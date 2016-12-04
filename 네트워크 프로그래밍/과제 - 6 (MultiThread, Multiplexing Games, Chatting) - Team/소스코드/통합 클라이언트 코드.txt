@@ -1,0 +1,778 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+
+int serv_sock; //서버소켓.//
+////////////////////////
+char escape[] = "./exit";
+char student_name[20]; //이름.//
+char student_number[20]; //학번.//
+char server_password[10]; //서버 접속 비밀번호.//
+////////////////////////
+void view_people_list(int serv_sock, char recv_buf[]); //채팅 접속 목록 리스트 뷰.//
+void ready_game_room(int serv_sock, char recv_buf[]);
+void Send_User_info(int serv_sock, char *user_name, char *user_number, char *server_password); //사용자의 정보를 보내는 함수.//
+int parsing(char *buf_message, int buf_size);
+void rank_view(int serv_sock, char recv_buf[]); //랭킹보기 기능.//
+void Print_Manual(int serv_sock, char recv_buf[]); //프로그램 도움말 기능.//
+void download_file(int serv_sock, char recv_buf[]);
+void save_download_file(char recv_download_file_content[], int size); //다운로드 받은 파일의 데이터를 저장.//
+void upload_file(int serv_sock); //파일 업로드.//
+void list_print(); //파일 리스트 출력.//
+void service_file_List(char send_buf[]); //서비스 리스트.//
+void Print_Info_Manual(); //프로그램 메뉴얼 정보.//
+//시그널 관련 함수.//
+void sig_handler(int signum);
+////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	struct sockaddr_in c_addr;
+
+	int len;
+	char chatData[BUFSIZ];
+	char buf[BUFSIZ];
+	int nfds;
+	
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	char *token = NULL;
+	char *delim = " ";
+	char *betting_money = NULL;
+
+	fd_set read_fds; //readfds, writefds, exceptfds중 readfds선언.//
+	int n;
+	int i;
+
+	//시그널 관련 변수.//
+	struct sigaction act;
+
+	act.sa_handler = sig_handler;
+	act.sa_flags = SA_RESTART;
+	sigfillset(&act.sa_mask);
+
+	sigaction(SIGINT, &act, NULL); //시그널 처리.//
+
+	if(argc < 3)
+	{
+		printf("usage : %s ip_address port_number\n", argv[0]);
+
+		exit(-1);
+	}
+
+	serv_sock = socket(PF_INET, SOCK_STREAM, 0); //소켓생성.//
+
+	//포트를 설정.//
+	memset(&c_addr, 0, sizeof(c_addr));
+	c_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	c_addr.sin_family = AF_INET; 
+	c_addr.sin_port = htons(atoi(argv[2]));
+
+	Print_Info_Manual();
+
+	printf("-------------<Student Info>-------------\n");
+	printf("* Input student name : ");
+	scanf("%s", student_name);
+
+	printf("* Input student number : ");
+	scanf("%s", student_number);
+
+	printf("*\033[%dm Input Server Password \033[0m: ", 31);
+	scanf("%s", server_password);
+
+	printf("----------------------------------------\n");
+
+	if(connect(serv_sock, (struct sockaddr *)&c_addr, sizeof(c_addr)) == -1)
+	{
+		printf("Can not connect\n");
+
+		return -1;
+	}
+
+	//이 부분에서 사용자의 정보를 보낸다.//
+	Send_User_info(serv_sock, student_name, student_number, server_password);
+
+	nfds = serv_sock + 1; //항상 +1을 해주어야 한다.//
+
+	while(1)
+	{
+		FD_ZERO(&read_fds); //먼저 read_fds의 배열을 다 0으로 초기화.//
+		//검사할 항목들을 1로 셋팅.//
+		FD_SET(0, &read_fds); //0번을 설정하면 표준입력이다.//
+		FD_SET(serv_sock, &read_fds); 
+
+		if(select(nfds, &read_fds, (fd_set *)0, (fd_set *)0, (struct timeval *)0) < 0) //이벤트 검사.//
+		{
+			exit(1);
+		}
+
+		if(FD_ISSET(serv_sock, &read_fds)) //서버로 부터 데이터 송수신이 있는 경우.//
+		{
+			memset(chatData, 0, sizeof(chatData));
+
+			if((n = read(serv_sock, chatData, sizeof(chatData))) > 0)
+			{
+				if(chatData[0] == '#') //서버가 주는 데이터 헤더가 '#'인 경우 파일데이터.//
+				{
+					char file_data[BUFSIZ];
+			
+					chatData[n] = '\0';
+
+					int size = n;
+					
+					for(i=0; i<size; i++) //#을 제거하기 위한 과정.//
+					{
+						file_data[i] = chatData[i+1];
+					}
+
+					save_download_file(file_data, n); //파일을 저장.//
+				}
+
+				else
+				{
+					write(1, chatData, n); //1로 주니 결국 표준출력이 된다.//
+				}
+			}
+		}
+
+		if(FD_ISSET(0, &read_fds)) //0번 즉 표준입력장치로 분터 데이터가 올 시.//
+		{
+			memset(buf, 0, sizeof(char)*BUFSIZ); //임시로 입력받을 버퍼공간 초기화.//
+			
+			if((n= read(0, buf, BUFSIZ)) > 0)
+			{
+				buf[n] = '\0';
+
+				int check = parsing(buf, n);
+
+				if(check == 1)
+				{
+					sprintf(chatData, "%s", buf);
+		
+					write(serv_sock, chatData, strlen(chatData));
+				}
+
+				else if(check != 1)
+				{
+					sprintf(chatData, "[%s %s] %s", student_number, student_name, buf);
+
+					write(serv_sock, chatData, strlen(chatData)); //서버로 보내기 위해 송신버퍼에다가 쓴다.//
+				}
+
+				if(!strncmp(buf, escape, strlen(escape)))
+				{
+					printf("\nHanshin Game Service End...\n");
+
+					//exit는 다른 사람들에게도 알려야 하므로 학번과 이름을 받는다.//
+					sprintf(chatData, "[%s %s] %s", student_number,student_name, recv_buf);
+					
+					write(serv_sock, chatData, strlen(chatData));
+
+					break;
+				}
+
+				if(!strncmp(chatData, "./view", strlen("./view"))) //현재 접속되어있는 멤버정보 옵션.//
+				{
+					view_people_list(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./ready", strlen("./ready")))
+				{
+					ready_game_room(serv_sock, buf); //게임을 시작한다.//
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./rank view", strlen("./rank view")))
+				{
+					rank_view(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./help", strlen("./help")))
+				{
+					Print_Manual(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./file download", strlen("./file download")))
+				{
+					download_file(serv_sock, buf);
+
+					memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+					break;
+				}
+
+				if(!strncmp(buf, "./file upload", strlen("./file upload")))
+				{
+					send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+	
+					if(send_len == -1)
+					{
+						fprintf(stderr, "write() error\n");
+						exit(1);
+					}
+		
+					memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+					//파일 목록을 보여준다.//
+					list_print();
+
+					upload_file(serv_sock); //파일을 업로드 한다.//
+
+					memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+				}
+			}
+		}
+	}
+
+	close(serv_sock);
+}
+//////////////////////////////////
+void list_print()
+{
+	int i;
+	char send_buf[BUFSIZ];
+
+	service_file_List(send_buf); //파일 하나에 대한 정보를 설정.//
+}
+/////////////////////////////////
+void service_file_List(char send_buf[])
+{
+	struct dirent *dp; //파일과 디렉터리 관련 여러 정보를 가지고 있는 구조체.//
+
+	DIR *dirp; //디렉터리를 가리킬 수 있는 타입.//
+	struct stat status; //파일에 대해서 세부적인 정보를 알 수 있는 구조체정보.//
+
+	int file_size = 0; //파일 사이즈가 저장될 변수.//
+	char file_size_buf[BUFSIZ];
+	int send_len = 0;
+	char *time; //날짜 관련 변수.//
+	char time_buf[BUFSIZ]; 
+	int inode;
+
+	if((dirp = opendir(".")) == NULL) //해당 디렉터리를 오픈해서 파일의 정보를 불러온다.//
+	{
+		fprintf(stderr, "opendir() error\n");
+		exit(1);
+	}
+
+	//디렉터리 내에 있는 파일을 읽는다.//
+	while((dp = readdir(dirp)) != NULL)
+	{
+		//stat를 이용해서 파일의 세부정보를 알아온다.//
+		if(stat(dp->d_name, &status) < 0)
+		{
+			fprintf(stderr, "stat() error\n");
+			exit(1);
+		}
+
+		inode = (int)dp->d_ino; //아이노드 데이터 추출.//
+		sprintf(send_buf, "%d", inode); //10진법의 숫자를 문자열로 변환.//
+		
+		file_size = (int)status.st_size;
+
+		//시간정보 추출.//
+		time = ctime(&status.st_ctime); //시간정보 기록.//
+
+		strcat(send_buf, " ");
+		time[24] = ' ';
+
+		strcat(send_buf, time);
+
+		//파일크기 정보.//
+		strcat(send_buf, " ");
+		sprintf(file_size_buf, "%d", (int)status.st_size);
+		strcat(send_buf, file_size_buf);
+
+		//파일이름 정보. 히든파일 개념은 숨긴다.//
+		strcat(send_buf, " ");
+
+		if(strcmp(dp->d_name, ".") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "..")==0)
+		{
+			continue;
+		}
+
+		else
+		{
+			strcat(send_buf, dp->d_name);
+		}
+
+		send_buf[strlen(send_buf)] = '\0';
+
+		strcat(send_buf, "\n");
+
+		//write(1, send_buf, strlen(send_buf));
+		printf("%s", send_buf);
+
+		//memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+
+	closedir(dirp);
+}
+/////////////////////////////////
+void Print_Info_Manual()
+{
+	printf("\n\033[%dm**************************** << HANSHIN GAME SERVICE >> ********************************\033[0m\n", 33);
+	printf("\033[%dm*\033[0m", 33);
+	printf("\033[%dm 1. Hanshin University students using the service network                       \033[0m", 32);
+	printf("\033[%dm      *\033[0m\n", 33);
+	printf("\033[%dm*\033[0m", 33);
+	printf("\033[%dm 2. Students can download the school announcements, event inforamtion activities\033[0m", 32);
+	printf("\033[%dm      *\033[0m\n", 33);
+	printf("\033[%dm*\033[0m", 33);
+	printf("\033[%dm 3. Students will have to present the connection between chat services are provided\033[0m", 32);
+	printf("\033[%dm   *\033[0m\n", 33);
+	printf("\033[%dm*\033[0m", 33);
+	printf("\033[%dm 4. Enter the name, student ID, certificate number to connect to a shared server\033[0m", 32);
+	printf("\033[%dm      *\033[0m", 33);
+	printf("\n\033[%dm****************************************************************************************\033[0m\n", 33);
+}
+/////////////////////////////////
+int parsing(char *buf_message, int buf_size)
+{
+	int check_value = 0; //0이면 '$'가 아닌경우.//
+	int i;
+	
+	if(buf_message[1] == '$')
+	{
+		check_value = 1;
+	}
+	
+	return check_value;
+}
+///////////////////////////////
+void Print_Manual(int serv_sock, char recv_buf[])
+{
+	char recv_manual_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_manual_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_manual_buf[recv_len] = '\0';
+
+	printf("%s",recv_manual_buf);
+
+	memset(recv_manual_buf, 0, sizeof(char)*BUFSIZ);
+}
+///////////////////////////////
+void ready_game_room(int serv_sock, char recv_buf[])
+{
+	char message_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+	int n;
+
+	if((n= read(serv_sock, message_buf, BUFSIZ)) > 0)
+	{
+		recv_buf[n] = '\0';
+		
+		printf("\033[%dmstate : %s\033[0m\n", 36,message_buf);
+	}
+}
+///////////////////////////////
+void Send_User_info(int serv_sock, char *user_name, char *user_number, char *server_password)
+{
+	//이 부분은 나중에 데이터를 받아서 처리만 해주면된다.//
+	char send_user_info_buf[BUFSIZ];
+	int send_user_info_buf_len;
+
+	sprintf(send_user_info_buf, "%s %s %s", user_name, user_number, server_password);
+
+	send_user_info_buf_len = write(serv_sock, send_user_info_buf, strlen(send_user_info_buf));
+
+	if(send_user_info_buf_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+}
+//////////////////////////////
+void view_people_list(int serv_sock, char recv_buf[])
+{
+	char recv_list_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_list_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_list_buf[recv_len] = '\0';
+
+	printf("%s", recv_list_buf);
+
+	memset(recv_list_buf, 0, sizeof(char)*BUFSIZ);
+}
+////////////////////////////
+void rank_view(int serv_sock, char recv_buf[])
+{
+	char recv_list_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_list_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_list_buf[recv_len] = '\0';
+
+	printf("%s", recv_list_buf);
+
+	memset(recv_list_buf, 0, sizeof(char)*BUFSIZ);
+}
+//////////////////////////////
+void sig_handler(int signum)
+{
+	if(signum == SIGINT)
+	{
+		fflush(stdout);
+
+		printf("\nHanshin Service End...\n");
+		
+		char *exit_message = NULL;
+		char chatData[BUFSIZ];
+
+		exit_message = (char*)malloc(strlen("Input")+1);
+		strcpy(exit_message, "./exit");
+
+		sprintf(chatData, "[%s %s] %s", student_number,student_name, exit_message);
+
+		write(serv_sock, chatData, strlen(chatData)); //서버로 전송.//
+
+		memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+		close(serv_sock);
+	}
+}	
+/////////////////////////////
+void download_file(int serv_sock, char recv_buf[])
+{
+	char recv_message_buf[BUFSIZ];
+	char send_file_name_buf[BUFSIZ];
+	char file_content[BUFSIZ]; //파일의 내용정보.//
+	int recv_len;
+	int send_len;
+
+	char file_name[BUFSIZ];
+
+	FILE *download_file =NULL; //파일 포인터.//
+
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+	
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_message_buf, 0, sizeof(char)*BUFSIZ);
+	memset(send_file_name_buf, 0, sizeof(char)*BUFSIZ);
+	memset(file_content, 0, sizeof(char)*BUFSIZ);
+
+	//서버로 부터 어떠한 파일을 다운받을건지에 대한 메시지를 받는다.//
+	recv_len = read(serv_sock, recv_message_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_message_buf[recv_len] = '\0';
+
+	//printf("\n%s", recv_message_buf);
+
+	printf("\033[%dm-------------------<<FTP File Service>>-------------------\033[0m\n", 34);
+
+	memset(recv_message_buf, 0, sizeof(char)*BUFSIZ);
+
+	//파일의 정보를 받는다.//
+	recv_len = read(0, send_file_name_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	send_file_name_buf[recv_len] = '\0';
+
+	send_len = write(serv_sock, send_file_name_buf, strlen(send_file_name_buf)); //서버에게 파일 이름을 전송.//
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	//2초뒤 파일의 데이터 정보 및 에러 메시지를 받아온다.//
+	sleep(2);
+
+	recv_len = read(serv_sock, file_content, BUFSIZ); //파일 데이터를 받는다. 에러메시지일 수도 있다.//
+	
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	file_content[recv_len] = '\0'; //마지막에 널 문자 붙여준다.//
+
+	if(strcmp(file_content, "file is not exist...") == 0) //만약 에러메시지일 경우.//
+	{
+		printf("\n\033[%dmfile is not exist...\033[0m\n", 33);
+	}
+}
+///////////////////////////
+void save_download_file(char recv_download_file_content[], int size)
+{
+	FILE *download_file_pointer = NULL;
+	char *file_name = NULL;
+	int i;
+
+	file_name = (char *)malloc(strlen("file_name")+1);
+
+	printf("\033[%dmInput File name : \033[0m(.txt)", 33);
+	scanf("%s", file_name);
+
+	//파일 입출력으로 연다.//
+	if((download_file_pointer = fopen(file_name, "wb")) == NULL)
+	{
+		fprintf(stderr, "fopen() error\n");
+		exit(1);
+	}
+	
+	for(i=0; i<size; i++)
+	{
+		fputc(recv_download_file_content[i], download_file_pointer);
+	}
+
+	fclose(download_file_pointer);
+
+	printf("\033[%dmFile Download Success ...\033[0m\n", 31);
+}
+////////////////////////////
+void upload_file(int serv_sock)
+{
+	char send_message_buf[BUFSIZ];
+	char file_name_buf[BUFSIZ];
+	char file_content[BUFSIZ]; //파일의 내용정보.//
+	char *upload_file_name = NULL;
+	char *upload_low_name = NULL;
+	char u_file_name[BUFSIZ];
+	int recv_len;
+	int send_len;
+	int buffer_count = 0;
+	char chracter;
+	int i;
+	char *delim = " ";
+	char *token = NULL;
+	char *error_message = NULL;
+
+	FILE *upload_file_pointer = NULL;
+
+	upload_file_name = (char *)malloc(strlen("Input")+1);
+	upload_low_name = (char *)malloc(strlen("Input")+1);
+
+	memset(send_message_buf, 0, sizeof(char)*BUFSIZ);
+	memset(file_name_buf, 0, sizeof(char)*BUFSIZ);
+	memset(file_content, 0, sizeof(char)*BUFSIZ);
+
+	printf("\033[%dm-------------------<<FTP File Service>>-------------------\033[0m\n", 34);
+
+	printf("* Upload file name: (./upload <upload file name>)\n");
+
+	//파일의 정보를 받는다.//
+	recv_len = read(0, file_name_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	token = strtok(file_name_buf, delim);
+
+	while(token != NULL)
+	{
+		strcpy(upload_low_name, token);
+
+		token = strtok(NULL, delim);
+	}
+
+	int size = strlen(upload_low_name)-1;
+
+	memset(file_name_buf, 0, sizeof(char)*BUFSIZ);
+
+	for(i=0; i<size; i++)
+	{
+		file_name_buf[i] = upload_low_name[i];
+	}
+
+	file_name_buf[strlen(file_name_buf)] = '\0';
+
+	printf("\nFTP Server upload file name : %s\n", file_name_buf);
+
+	printf("\n\033[%dm*********************\033[0m", 36);
+	//지연시간을 주어서 파일을 전송받는다.//
+
+	printf("\n\033[%dmFile searching, uploading...(wait a few seconds)\033[0m\n", 31);
+
+	//파일이름을 가지고 입력을 받는다.//
+	if((upload_file_pointer = fopen(file_name_buf, "r")) == NULL)
+	{
+		printf("\033[%dmfile is not exist...\033[0m\n", 35);
+		printf("\033[%dm*********************\033[0m\n", 36);
+
+		memset(file_name_buf, 0, sizeof(char)*BUFSIZ);
+		memset(file_content, 0, sizeof(char)*BUFSIZ);
+
+		error_message = (char *)malloc(strlen("Input"));
+
+		strcpy(error_message, "file is not exist...");
+
+		write(serv_sock, error_message, strlen(error_message));
+	}
+
+	else //파일오픈에 성공.//
+	{
+		send_len = write(serv_sock, "success", strlen("success"));
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+
+		
+		sleep(1); //2초. 서버가 충분히 파일이름을 받을 수 있게 한다.//
+
+		//printf("file name : %s\n", file_name_buf);
+		
+		//일정 지연시간을 준다.//
+		send_len = write(serv_sock, file_name_buf, strlen(file_name_buf));
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+
+		sleep(1); //2초. 서버가 충분히 파일이름을 받을 수 있게 한다.//
+		
+		//파일에 데이터를 읽어온다.//
+		while((chracter = fgetc(upload_file_pointer)) != EOF)
+		{
+			file_content[buffer_count] = chracter;
+
+			buffer_count++; //버퍼에 저장하기 위해서 다음 버퍼로 이동한다.//
+		}
+
+		strcat(file_content, "\n");
+
+		file_content[strlen(file_content)+1] = '\0';
+
+		send_len = write(serv_sock, file_content, strlen(file_content));
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+
+		sleep(1);
+
+		printf("\033[%dmfile uploading Success!!\033[0m\n", 35);
+		printf("\033[%dm*********************\033[0m\n", 36);
+
+		memset(file_name_buf, 0, sizeof(char)*BUFSIZ);
+		memset(file_content, 0, sizeof(char)*BUFSIZ);
+
+		printf("\033[%dm----------------------------------------------------------\033[0m\n", 34);
+
+		fclose(upload_file_pointer);
+	}
+}

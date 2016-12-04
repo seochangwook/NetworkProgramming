@@ -1,0 +1,366 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+
+int serv_sock; //서버소켓.//
+////////////////////////
+char escape[] = "exit";
+char student_name[20]; //이름.//
+char student_number[20]; //학번.//
+////////////////////////
+void view_people_list(int serv_sock, char recv_buf[]); //채팅 접속 목록 리스트 뷰.//
+void ready_game_room(int serv_sock, char recv_buf[]);
+void Send_User_info(int serv_sock, char *user_name, char *user_number); //사용자의 정보를 보내는 함수.//
+int parsing(char *buf_message, int buf_size);
+void rank_view(int serv_sock, char recv_buf[]); //랭킹보기 기능.//
+void Print_Manual(int serv_sock, char recv_buf[]); //프로그램 도움말 기능.//
+//시그널 관련 함수.//
+void sig_handler(int signum);
+////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	struct sockaddr_in c_addr;
+
+	int len;
+	char chatData[BUFSIZ];
+	char buf[BUFSIZ];
+	int nfds;
+	
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	char *token = NULL;
+	char *delim = " ";
+	char *betting_money = NULL;
+
+	fd_set read_fds; //readfds, writefds, exceptfds중 readfds선언.//
+	int n;
+
+	//시그널 관련 변수.//
+	struct sigaction act;
+
+	act.sa_handler = sig_handler;
+	act.sa_flags = SA_RESTART;
+	sigfillset(&act.sa_mask);
+
+	sigaction(SIGINT, &act, NULL); //시그널 처리.//
+
+	if(argc < 3)
+	{
+		printf("usage : %s ip_address port_number\n", argv[0]);
+
+		exit(-1);
+	}
+
+	serv_sock = socket(PF_INET, SOCK_STREAM, 0); //소켓생성.//
+
+	//포트를 설정.//
+	memset(&c_addr, 0, sizeof(c_addr));
+	c_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	c_addr.sin_family = AF_INET; 
+	c_addr.sin_port = htons(atoi(argv[2]));
+
+	printf("Input student name : ");
+	scanf("%s", student_name);
+
+	printf("Input student number : ");
+	scanf("%s", student_number);
+
+	if(connect(serv_sock, (struct sockaddr *)&c_addr, sizeof(c_addr)) == -1)
+	{
+		printf("Can not connect\n");
+
+		return -1;
+	}
+
+	//이 부분에서 사용자의 정보를 보낸다.//
+	Send_User_info(serv_sock, student_name, student_number);
+
+	nfds = serv_sock + 1; //항상 +1을 해주어야 한다.//
+
+	while(1)
+	{
+		FD_ZERO(&read_fds); //먼저 read_fds의 배열을 다 0으로 초기화.//
+		//검사할 항목들을 1로 셋팅.//
+		FD_SET(0, &read_fds); //0번을 설정하면 표준입력이다.//
+		FD_SET(serv_sock, &read_fds); 
+
+		if(select(nfds, &read_fds, (fd_set *)0, (fd_set *)0, (struct timeval *)0) < 0) //이벤트 검사.//
+		{
+			printf("select error\n");
+
+			exit(1);
+		}
+
+		if(FD_ISSET(serv_sock, &read_fds)) //서버로 부터 데이터 송수신이 있는 경우.//
+		{
+			memset(chatData, 0, sizeof(chatData));
+
+			if((n = read(serv_sock, chatData, sizeof(chatData))) > 0)
+			{
+				write(1, chatData, n); //1로 주니 결국 표준출력이 된다.//
+			}
+		}
+
+		if(FD_ISSET(0, &read_fds)) //0번 즉 표준입력장치로 분터 데이터가 올 시.//
+		{
+			memset(buf, 0, sizeof(char)*BUFSIZ); //임시로 입력받을 버퍼공간 초기화.//
+			
+			if((n= read(0, buf, BUFSIZ)) > 0)
+			{
+				buf[n] = '\0';
+
+				int check = parsing(buf, n);
+
+				if(check == 1)
+				{
+					sprintf(chatData, "%s", buf);
+		
+					write(serv_sock, chatData, strlen(chatData));
+				}
+
+				else if(check != 1)
+				{
+					sprintf(chatData, "[%s] %s", student_name, buf);
+
+					write(serv_sock, chatData, strlen(chatData)); //서버로 보내기 위해 송신버퍼에다가 쓴다.//
+				}
+
+				if(!strncmp(buf, escape, strlen(escape)))
+				{
+					printf("\nHanshin Game Service End...\n");
+
+					//exit는 다른 사람들에게도 알려야 하므로 학번과 이름을 받는다.//
+					sprintf(chatData, "[%s %s] %s", student_number,student_name, recv_buf);
+					
+					write(serv_sock, chatData, strlen(chatData));
+
+					break;
+				}
+
+				if(!strncmp(chatData, "./view", strlen("./view"))) //현재 접속되어있는 멤버정보 옵션.//
+				{
+					view_people_list(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./ready", strlen("./ready")))
+				{
+					ready_game_room(serv_sock, buf); //게임을 시작한다.//
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./rank", strlen("./rank")))
+				{
+					rank_view(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				if(!strncmp(chatData, "./help", strlen("./help")))
+				{
+					Print_Manual(serv_sock, buf);
+
+					memset(buf, 0, sizeof(char)*BUFSIZ);
+				}
+			}
+		}
+	}
+
+	close(serv_sock);
+}
+/////////////////////////////////
+int parsing(char *buf_message, int buf_size)
+{
+	int check_value = 0; //0이면 '$'가 아닌경우.//
+	int i;
+	
+	if(buf_message[1] == '$')
+	{
+		check_value = 1;
+	}
+	
+	return check_value;
+}
+///////////////////////////////
+void Print_Manual(int serv_sock, char recv_buf[])
+{
+	char recv_manual_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_manual_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_manual_buf[recv_len] = '\0';
+
+	printf("%s",recv_manual_buf);
+
+	memset(recv_manual_buf, 0, sizeof(char)*BUFSIZ);
+}
+///////////////////////////////
+void ready_game_room(int serv_sock, char recv_buf[])
+{
+	char message_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+	int n;
+
+	if((n= read(serv_sock, message_buf, BUFSIZ)) > 0)
+	{
+		recv_buf[n] = '\0';
+		
+		printf("state : %s\n", message_buf);
+	}
+}
+///////////////////////////////
+void Send_User_info(int serv_sock, char *user_name, char *user_number)
+{
+	//이 부분은 나중에 데이터를 받아서 처리만 해주면된다.//
+	char send_user_info_buf[BUFSIZ];
+	int send_user_info_buf_len;
+
+	sprintf(send_user_info_buf, "%s %s", user_name, user_number);
+
+	send_user_info_buf_len = write(serv_sock, send_user_info_buf, strlen(send_user_info_buf));
+
+	if(send_user_info_buf_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+}
+//////////////////////////////
+void view_people_list(int serv_sock, char recv_buf[])
+{
+	char recv_list_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_list_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_list_buf[recv_len] = '\0';
+
+	printf("%s", recv_list_buf);
+
+	memset(recv_list_buf, 0, sizeof(char)*BUFSIZ);
+}
+////////////////////////////
+void rank_view(int serv_sock, char recv_buf[])
+{
+	char recv_list_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//서버로 데이터 전송.//
+	send_len = write(serv_sock, recv_buf, strlen(recv_buf));
+
+	if(send_len == -1)
+	{
+		fprintf(stderr, "write() error\n");
+		exit(1);
+	}
+
+	memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+	//리스트 정보를 가져온다.//
+	recv_len = read(serv_sock, recv_list_buf, BUFSIZ);
+
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_list_buf[recv_len] = '\0';
+
+	printf("%s", recv_list_buf);
+
+	memset(recv_list_buf, 0, sizeof(char)*BUFSIZ);
+}
+//////////////////////////////
+void sig_handler(int signum)
+{
+	if(signum == SIGINT)
+	{
+		fflush(stdout);
+
+		printf("\nHanshin Service End...\n");
+		
+		char *exit_message = NULL;
+		char chatData[BUFSIZ];
+
+		exit_message = (char*)malloc(strlen("Input")+1);
+		strcpy(exit_message, "./exit");
+
+		sprintf(chatData, "[%s %s] %s", student_number,student_name, exit_message);
+
+		write(serv_sock, chatData, strlen(chatData)); //서버로 전송.//
+
+		memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+		close(serv_sock);
+	}
+}	

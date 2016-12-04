@@ -1,0 +1,392 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+#include<sys/resource.h> //getrlimit시스템 콜 사용.//
+#include<sys/ioctl.h>
+#include<net/if.h>
+
+#define FROM_address "my_ip_address" //자신의 IP주소.//
+#define MAX_TTL 30 //최대 TTL수.(기본 Traceroute의 TTL값을 의미)//
+//////////////////////////////
+void handle_traceroute(); //ping관련되어서 제어하는 함수.//
+unsigned short cksum_in(unsigned short *addr, int len); //icmp헤더의 체크섬을 구하기 위한 함수.//
+void tv_sub(struct timeval *out, struct timeval *in);
+int parsing_ip_domain(char recv_buf[]); //파싱하는 경우.//
+int DecodeICMPMessage(int ttl,char *buf, int len, struct sockaddr_in *from, struct sockaddr_in *to); //ICMP메시지를 해석하는 부분.//
+void time_exceed_handle(int sig_num); //알람 핸들러 처리.//
+///////////////////////////////
+pid_t pid;
+
+int sd;
+
+//보내고 받는 구조체//
+struct sockaddr_in sasend; //목적지 정보가 저장될 주소 구조체.//
+struct sockaddr_in sarecv;
+
+int salen;
+int time_exceed = 0;
+
+//로그파일 관련 전역변수로 설정.//
+//로그파일 관련 변수 - 시그널 부분에서도 처리를 해야 하기에 전역변수로 선언.//
+FILE *log_file = NULL;
+
+struct tm *t; //시간관련 구조체.//
+time_t timer; //시간측정.//
+////////////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	struct hostent *host; //도메인 주소정보를 셋팅하기 위해서 hostent구조체를 사용.//
+	struct sockaddr_in addr; //주소를 저장하기 위한 구조체.//
+	struct sockaddr_in peeraddr;
+
+	int check_value;
+	int i;
+
+	char *address = NULL;
+
+	if(argc != 2)
+	{
+		printf("usage : sudo ./my_traceroute <dest domain/ip address>\n");
+
+		exit(-1);
+	}
+
+	bzero((char *)&sasend, sizeof(sasend)); //주소설정을 위한 초기화.//
+
+	address = (char *)malloc(strlen(argv[1])+1);
+	strcpy(address, argv[1]); //원본데이터를 보존하기 위해서 복사.//
+
+	//도메인, IP입력 부분을 IP로 변경.//
+	check_value = parsing_ip_domain(address);
+
+	if(check_value == 0) //입력된 값이 도메인 주소인 경우.//
+	{
+		host = gethostbyname(address); //클라이언트가 질의한 도메인을 기입한다.DNS서버로부터 정보를 가져온다.//
+	
+		strcpy(address, inet_ntoa(*(struct in_addr *)host->h_addr_list[0])); //원본데이터를 보존하기 위해서 복사.//
+	}
+
+	else if(check_value == 1) //입력된 값이 ip주소인 경우.//
+	{
+		//주소부분은 sockaddr_in에다가 할당을 해주어야 한다.//
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_addr.s_addr = inet_addr(address);
+
+		host = gethostbyaddr((char *)&addr.sin_addr, 4, AF_INET); //다음의 경우는 IP주소를 변경해준다.//
+	}
+
+	//도착지 주소 설정.//
+	sasend.sin_addr.s_addr = inet_addr(address);
+	sasend.sin_family = AF_INET;
+	salen = sizeof(sasend);
+
+	pid = getpid() & 0xffff; //ICMP ID (16bit)//
+
+	printf("\n\033[%dmTrace the path a packet start...\033[0m\n\n", 31);
+
+	//로그파일을 오픈.//
+	if((log_file = fopen("traceroute_logfile.txt", "a")) == NULL)
+	{
+		fprintf(stderr, "log_file open error\n");
+		exit(1);
+	}
+
+	fputs("------------------< Trace the path a packet >------------------", log_file);
+
+	fputs("\n", log_file);
+	
+	timer = time(NULL); //현재 시각을 초 단위로 얻기.//
+	t = localtime(&timer); //초 단위의 시간을 분리하여 구조체에 넣는다.//
+
+	fputs("* Packet trace Access time : ", log_file);									
+				
+	fprintf(log_file, "%d.%d.%d %d:%d:%d\n", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+	fprintf(log_file,"* Packet trace destination : %s (%s)\n",address, argv[1]);
+
+	fputs("\n", log_file);
+
+	fputs("Trace start...", log_file);
+	fputs("\n\n", log_file);
+	
+	handle_traceroute(); //traceroute를 수행하는 알고리즘.//
+
+	fputs("---------------------------------------------------------------", log_file);
+	fputs("\n", log_file);
+
+	fclose(log_file);
+}
+/////////////////////////////////
+void handle_traceroute()
+{
+	//icmp에코메시지를 받아서 처리하는 부분.//
+	int recv_len, hlen, icmplen, send_len, peeraddr_len;
+	int len;
+	int check;
+
+	char rbuf[1500];
+	int ttl;
+	int optval = 1000; //TTL값이 저장될 변수.//
+	int retval; //소켓설정의 결과가 반환될 변수.//
+
+	fd_set readfd;
+
+	struct iphdr *iph; //ip의 헤더정보가 들어있는 구조체 선언.//
+	struct icmp *icmp; //icmp의 헤더정보가 들어있는 구조체 선언.//
+	struct sockaddr_in peeraddr; //중간도착지(peeraddr)정보.//
+
+	char sendbuf[1500];
+	int datalen = 56; //고정.윈도우는 보통 32.//
+
+	if((sd = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0) //ICMP타입의 raw소켓을 생성.//
+		//이제 ICMP프로토콜에 대해서 직접 제어, 수정이 가능하다.//
+	{
+		printf("socket open error\n");
+
+		exit(-1);
+	}
+
+	for(ttl=1; ttl<=MAX_TTL; ttl++) //TTL값이 0이면 그것은 네트워크 이론 상 있을 수 없으니 0이면 setsockopt()에서 오류가 난다. 최대 TTL값인 30로 조정.//
+	{
+		struct timeval tv;
+		tv.tv_sec = 3;
+		tv.tv_usec = 0;
+
+		if(setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)) < 0)
+		{
+			fprintf(stderr, "setsockopt() error\n");
+		}
+	
+		optval = ttl; //TTL값을 얻어온다.//
+	
+		//IP의 모든 정보를 수정하도록 하는것 보다 TTL값만 바꾸는 것.//
+		retval = setsockopt(sd, IPPROTO_IP, IP_TTL, (char *)&optval, sizeof(optval)); //IP헤더를 조작.TTL값을 변경.//
+
+		if(retval == -1) //소켓 설정 시 에러.//
+		{
+			printf("setsockop() error\n");
+			
+			break;
+		}
+
+		
+		//ICMP부분 초기화.//
+		icmp = (struct icmp *)sendbuf;
+
+		//메시지 구조체에 정보들을 할당부분.//
+		icmp->icmp_type = 8; //에코 메시지로 설정. 응답을 받기 위한 것이니 8번 ECHOREQUEST가 되야 한다.//
+		icmp->icmp_code = 0;
+		icmp->icmp_id = pid;
+		icmp->icmp_seq = optval; //icmp의 seq의 값을 초기화.//
+
+		memset(icmp->icmp_data, 0xa5, datalen); //옵션데이터를 저장하기 위해서 메모리 초기화.//
+
+		gettimeofday((struct timeval *)icmp->icmp_data, NULL); //시간정보를 얻어와서 옵션 데이터 부분에 저장.//
+
+		len = 8+datalen; //헤더부분이 8바이트.(32x2 = 64(8byte))//
+
+		icmp->icmp_cksum = 0;
+		icmp->icmp_cksum = cksum_in((unsigned short *)icmp, len); //체크섬 값을 계산.//
+
+		send_len = sendto(sd, sendbuf, len, 0, (struct sockaddr *)&sasend, salen); //에코 메시지를 전송한다.//
+		
+		peeraddr_len = sizeof(peeraddr);
+
+		if(send_len == -1)
+		{
+			printf("sendto() error\n");
+			
+			break;
+		}
+		
+		if((recv_len = recvfrom(sd, rbuf, sizeof(rbuf), 0, (struct sockaddr *)&peeraddr, &peeraddr_len)) < 0)
+		{
+			printf("* * *\n");
+			fputs("* * *", log_file);
+			fputs("\n", log_file);
+
+			continue;
+		}
+		
+		check = DecodeICMPMessage(optval, rbuf, recv_len, &peeraddr, &sasend);
+
+		if(check == 1) //목적지에 대한 응답신호가 왔을 경우.//
+		{
+			break;
+		}
+	}
+}
+///////////////////////////////////
+void tv_sub(struct timeval *out, struct timeval *in)
+{
+	if((out->tv_usec -= in->tv_usec) < 0)
+	{
+		--out->tv_sec;
+		out->tv_usec += 1000000;
+	}
+
+	out->tv_sec -= in->tv_sec; //왕복시간을 구함.//
+}
+/////////////////////////////////////
+int parsing_ip_domain(char *string)
+{
+	int check_value = 0; //기본 반환은 도메인이 된다.//
+	int i;
+	
+	if(isalpha(string[0])) //첫글자가 알파벳인가? 알파벳이면 도메인명이다.//
+	{
+		check_value = 0;
+	}
+
+	else if(isdigit(string[0])) //첫글자가 10진수 숫자인가? 숫자이면 IP주소가 된다.//
+	{
+		check_value = 1;
+	}
+
+	return check_value;
+}
+////////////////////////////////////
+int DecodeICMPMessage(int ttl, char *buf, int len, struct sockaddr_in *from, struct sockaddr_in *to)
+{
+	struct iphdr *iph; //ip의 헤더정보가 들어있는 구조체 선언.//
+	struct icmp *icmp; //icmp의 헤더정보가 들어있는 구조체 선언.//
+	struct timeval tval;
+	struct timeval *tvsend, tvrecv; //시간을 기록하기 위해서 timeval구조체 선언.//
+
+	double rtt; //전송속도 변수.(왕복시간)//
+
+	int success_message_code; //정상메시지인지 비정상 메시지인지 구분하는 플래그 값.0이면 정상, 1이면 비정상 메시지.//
+	int recv_len, hlen, icmplen, send_len;
+	
+	iph = (struct iphdr *)buf; //디폴트로 현재 되있는 상태이다 이유는 시스템 상에서 제공하는 ip정보를 사용.//
+	//traceroute를 만들 시 ip헤더를 직접 구현.// 
+	hlen = iph->ihl * 4; //ip헤더의 길이를 구한다. HLEN = HLEN * 4;
+
+	if(iph->protocol != IPPROTO_ICMP) //프로토콜이 ICMP가 아니면 반환.//
+	{
+		success_message_code = 0;
+
+		return success_message_code;
+	}
+
+	icmp = (struct icmp *)(buf + hlen); //ICMP를 만들어 주기 위한 과정.//
+
+	icmplen = len - hlen; //송신받은 사이즈에서 현재 헤더길이를 뺀것이 바이트 크기(길이)가 된다.//
+
+	if(icmplen < 8)
+	{
+		printf("** Message : [ERROR] ICMP packet is too short... **\n");
+	
+		success_message_code = 0;
+
+		return success_message_code;
+	}
+
+	gettimeofday(&tvrecv, NULL); //에코응답패킷을 받은 시간을 측정.//
+
+	tvsend = (struct timeval *)icmp->icmp_data; //옵션 데이터 부분에 기록된 시간정보를 추가한다.//
+
+	//인자는 에코 응답 메시지를 전송받은 시각, 에코 응답 메시지에 기록된 전송시각이다.//
+	tv_sub(&tvrecv, tvsend);
+
+	rtt = tvrecv.tv_sec * 1000.0 + tvrecv.tv_usec / 1000.0; //전송속도 측정.(네트워크의 상태나 전송상태를 알 수 있다.//
+
+	if(icmp->icmp_type == 0) //목표로 하는 주소에게 정확한 ECHOREPLY가 왔을 경우.//
+	{
+		fputs("\n", log_file);
+		fputs("Trace Success...", log_file);
+		fputs("\n\n", log_file);
+		fputs("*Result", log_file);
+		fputs("\n", log_file);
+
+		printf("\n");
+		printf("\033[%dmTrace the path a packet completion...\033[0m\n\n",31);
+
+		printf("%d hop from [%s] dest [%s]\n", ttl,inet_ntoa(from->sin_addr),inet_ntoa(to->sin_addr)); //ping메시지를 구현한다.ttl은 ip헤더에서 가져온다.//
+		fprintf(log_file, "%d hop from [%s] dest [%s]\n", ttl,inet_ntoa(from->sin_addr),inet_ntoa(to->sin_addr));
+
+		printf("(%d max hops / %d hops / duration [%.3f]ms)\n\n", MAX_TTL, ttl, rtt);     
+
+		fprintf(log_file, "(%d max hops / %d hops / duration [%.3f]ms)\n", MAX_TTL, ttl, rtt);
+
+		success_message_code = 1;
+
+		return success_message_code;
+	}
+
+	else if(icmp->icmp_type == ICMP_TIME_EXCEEDED) //시간초과(TTL초과) 메시지시 전송.(목표지점이 아닌 라우터나 다른 IP주소에서 왔을 경우).//
+	{
+		printf("%d hop from [%s] dest [%s]\n", ttl,inet_ntoa(from->sin_addr),inet_ntoa(to->sin_addr)); //ping메시지를 구현한다.ttl은 ip헤더에서 가져온다.//
+
+		fprintf(log_file, "%d hop from [%s] dest [%s]\n", ttl,inet_ntoa(from->sin_addr),inet_ntoa(to->sin_addr));
+
+		success_message_code = 0;
+
+		return success_message_code;
+	}
+
+	else if(icmp->icmp_type == 3) //ICMP_Destination Unreachable Message(최대 TTL값까지 다 적용해봐도 찾지 못한 경우)//
+	{
+		printf("** Message : [ERROR] Host unreachable... **\n");
+
+		success_message_code = 1;
+
+		return success_message_code;
+	}
+}
+///////////////////////////////
+unsigned short cksum_in(unsigned short *addr, int len)
+{
+	unsigned long sum = 0;
+	unsigned short answer = 0;
+	unsigned short *w = addr;
+
+	int nleft = len;
+
+	while(nleft > 1)
+	{
+		sum += *w++;
+
+		if(sum & 0x80000000)
+		{
+			sum = (sum & 0xffff) + (sum >> 16);
+		}
+
+		nleft -= 2;
+	}
+
+	if(nleft == 1)
+	{
+		*(unsigned char *)(&answer) = *(unsigned char *)w;
+
+		sum+=answer;
+	}
+
+	while(sum >> 16)
+	{
+		sum = (sum & 0xffff) + (sum >> 16);
+	}
+
+	return (sum == 0xffff) ? sum : ~sum;
+}

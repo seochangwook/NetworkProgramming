@@ -1,0 +1,995 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+
+#define MAX_HANSHIN_MEMBER 10 //채팅, FTP관련 최대 접속 클라이언트 수 정의.//
+#define MAX_CLIENT 10 //최대 게임을 하는 사람의 수 정의.//
+#define INVALID_SOCK -1 //현재 사용되어지지 않는 무효한 소켓.//
+///////////////////////////
+//소켓관련 변수. 전역변수로 해야지 시그널 처리 가능.//
+int serv_sock;
+
+//시간관련 구조체. 시간정보는 여러 로그파일에서 사용되므로 전역변수로 선언.//
+struct tm *t; //시간관련 구조체.//
+time_t timer; //시간측정 변수.//
+
+FILE *FTP_logfile_pointer = NULL; //FTP관련 로그파일.//
+///////////////////////////
+//채팅, FTP관련 멤버 구조체.//Welcome to Hanshin Service//
+typedef struct Student //학생 한명당 소켓이 되는 원리.즉 소켓이 연결해제가 되면 현재 학생정보는 초기화 상태로 있게 된다.//
+{
+	char *student_info;
+	int student_socket;
+}Student;
+
+Student hanshin_member_list[MAX_HANSHIN_MEMBER]; //구조체 배열을 선언.//
+////////////////////////////
+//고정 메시지 관련 변수.//
+char CODE200[] = "Sorry No More Connection\n";
+char CODE300[] = "The Service does not exist\n";
+char member_ship[] = "Student connect";
+char not_people[] = "Empty";
+char out_message[] = "Student Chat room out...\n";
+char server_out_message[] = "Hanshin server exit... (All Connection Fail)\nPlease connect again later\n";
+char in_message[] = "Student Chat room entry...\n";
+char not_secure_message[] = "Access password is incorrect. Please check again (ref Hanshin University website)\n";
+char escape[] = "exit";
+//채팅,FTP관련 서비스 관련 함수.//
+int push_service_Client(int c_socket, char *stu_info);
+int pop_service_Client(int select_socket);
+void List_View(int select_socket);  //파일 목록.//
+void list_print(int select_socket); //파일 리스트 출력.//
+void service_file_List(int clnt_sock, char send_buf[]); //서비스 리스트.//
+void download_file(int select_socket); //다운로드 기능.//
+void upload_file(int select_socket); //업로드 기능.//
+int Check_Info(char *input_password);
+void list_print(int select_socket); //파일 리스트 출력.//
+void service_file_List(int clnt_sock, char send_buf[]); //서비스 리스트.//
+//게임관련 서비스 관련 함수.//
+int game_insert_room(int select_socket); //게임방에 현재 들어 갈 수 있는지 검사.//
+/////////////////////////////
+//시그널 관련 함수.//
+void sig_handler(int signo); //시그널 처리함수.//
+////////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	//소켓관련 변수.//
+	int clnt_sock;
+
+	struct sockaddr_in serv_addr, clnt_addr; //서버와 클라이언트들의 주소를 설정할 구조체.//
+	socklen_t clnt_addr_size;
+
+	//데이터 송수신 관련변수.//
+	char send_buf[BUFSIZ];
+	char recv_buf[BUFSIZ];
+	int send_len;
+	int recv_len;
+
+	//멀티 플렉싱 관련 변수.//
+	int nfds = 0;
+	int i,j,n;
+	fd_set read_fds; //읽기소켓 목록을 나타내는 read_fds정의.//
+	int res;
+
+	//서비스 관련 변수.//
+	char chatData[BUFSIZ]; //체팅 데이터가 저장 될 데이터 배열.//
+	char *stu_info = NULL;
+	char *Welcome_message = NULL;
+	char *Chat_FTP_command_message = NULL;
+	char *Game_command_message = NULL;
+
+	//시그널 관련 부분.//
+	struct sigaction act;
+
+	act.sa_handler = sig_handler;
+	act.sa_flags = SA_RESTART;
+	sigfillset(&act.sa_mask);
+
+	sigaction(SIGINT, &act, NULL); //시그널 적용.//
+
+	if(argc < 2)
+	{
+		printf("usage : %s port_number\n", argv[0]);
+
+		exit(-1);
+	}
+
+	serv_sock = socket(PF_INET, SOCK_STREAM, 0); //IPV4와 TCP유형으로 소켓 생성.//
+
+	memset(&serv_addr, 0, sizeof(serv_addr)); //s_addr의 구조체를 설정하기 위해서 우선 초기화.//
+	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY); //모든 IP를 다 받는다.//
+	serv_addr.sin_family = AF_INET; //IPV4의 구조.//
+	serv_addr.sin_port = htons(atoi(argv[1])); //포트를 설정.//
+
+	//설정한 포트를 소켓과 결합.//
+	if(bind(serv_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
+	{
+		printf("Can not Bind\n");
+
+		return -1;
+	}
+
+	//backlog값을 MAX_CLIENT로 주면 최대 목록의 수는 10개의 소켓목록이 저장될 수 있다.//
+	if(listen(serv_sock, MAX_HANSHIN_MEMBER == -1))
+	{
+		printf("listen Fail\n");
+
+		return -1;
+	}
+
+	//체팅, FTP를 위한 구조체 배열 초기화.//
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		hanshin_member_list[i].student_socket = INVALID_SOCK; //현재 최대 클라이언트까지 모든 소켓을 우선 무효한 소켓으로 만든다.//
+	}
+
+	while(1)
+	{
+		nfds = serv_sock;
+
+		FD_ZERO(&read_fds); //연결소켓 목록이 저장될 버퍼를 0으로 초기화.//
+		FD_SET(serv_sock, &read_fds); //서버소켓을 등록.//
+
+		for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+		{
+			if(hanshin_member_list[i].student_socket != INVALID_SOCK) //무효한 소켓이 아닌경우.//
+			{
+				FD_SET(hanshin_member_list[i].student_socket, &read_fds); //연결소켓 목록에 설정.//
+
+				if(hanshin_member_list[i].student_socket > nfds)
+				{
+					nfds = hanshin_member_list[i].student_socket;
+				}
+			}
+		}
+
+		nfds++;
+
+		//데이터 수신등의 이벤트가 발생할때 까지 select에서 대기.최초 소켓은 select()를 거치게 된다.//
+		if(select(nfds, &read_fds, (fd_set *)0, (fd_set *)0, (struct timeval *)0) < 0)
+		{
+			exit(1);
+		}
+
+		//현재 발생한 이벤트가 무엇인지 검사.//
+		if(FD_ISSET(serv_sock, &read_fds)) //이 경우는 새로운 연결을 요청하는 클라이언트가 있을 경우.//
+		{
+			clnt_addr_size = sizeof(clnt_addr_size);
+
+			//연결요청으로 들어온 소켓에 대해서 accept로 처리.//
+			if((clnt_sock = accept(serv_sock, (struct sockaddr *)&clnt_addr, &clnt_addr_size)) > 0)
+			{
+				res = push_service_Client(clnt_sock, stu_info); //현재의 통신을 하고자 하는 소켓을 클라이언트 목록에 추가.//
+
+				if(res == -1) //0보다 작다는건 에러 즉 최대 클라이언트의 개수를 초과 시.//
+				{
+					write(clnt_sock, CODE200, strlen(CODE200)); //CODE200의 메시지를 보낸다.//
+					
+					close(clnt_sock); //소켓을 닫는다.//
+				}
+
+				else if(res == 0)//연결이 가능하다면 환영인사 문구를 전송.//
+				{
+					memset(send_buf, 0 , sizeof(char)*BUFSIZ);
+
+					//Welcome_message = (char *)malloc(strlen("Input")+1);
+					//Chat_FTP_command_message = (char *)malloc(strlen("Input")+1);
+
+					strcpy(send_buf, "Welcome to Hanshin Service\n\n");
+					strcat(send_buf, "*************************<Reserved commands>***********************\n");
+					strcat(send_buf, "<./file download - Download the file in the FTP(Share) directory. >\n");
+					strcat(send_buf, "< ./file upload  - FTP upload files to a shared folder.           >\n");
+					strcat(send_buf, "<    ./view      - It shows a list of the students in chat rooms. >\n");
+					strcat(send_buf, "<  ./exit, ^C    - Exit the Hanshin services.                     >\n");
+					strcat(send_buf, "< ./insert game  - Black jack game room insert.                   >\n");
+					strcat(send_buf, "*******************************************************************\n");
+					strcat(send_buf, "----------------------------------------\n");
+
+					write(clnt_sock, send_buf, strlen(send_buf));
+					
+					memset(send_buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				else if(res == -2) //인증실패.//
+				{
+					write(clnt_sock, not_secure_message, strlen(not_secure_message));
+
+					close(clnt_sock);
+				}
+			}
+		}
+
+		//멀티플렉싱의 서비스를 담당한다.//
+
+		for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+		{
+			//현재 데이터 수신이 들어온 소켓을 찾기 위해서 비교과정.//
+			//기본적으로 한신 서비스는 멀티채팅 기반이다.//
+			//이 경우는 현재 등록되 있는 클라이언트로 부터 체팅 데이터가 발생했을 경우.//
+			if((hanshin_member_list[i].student_socket != INVALID_SOCK) && FD_ISSET(hanshin_member_list[i].student_socket, &read_fds))
+			{
+				memset(recv_buf, 0, sizeof(char)*BUFSIZ); //데이터를 받기 위해 초기화.//
+				memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+				//read로 수신버퍼에 있는 내용을 읽어온다.받는건 한번에 받고 각 서비스의 헤더에 따라 분할.//
+				if((recv_len = read(hanshin_member_list[i].student_socket, recv_buf, BUFSIZ)) > 0)
+				{
+					recv_buf[recv_len] = '\0';
+
+					printf("%s\n", recv_buf);
+					
+					//서비스 부분.특정 문자열로 파싱.//
+					//파일 입출력 서비스 제공.//
+					if(strstr(recv_buf, "./file download") != NULL)
+					{
+						memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+						list_print(hanshin_member_list[i].student_socket);
+					
+						download_file(hanshin_member_list[i].student_socket);
+
+						break;
+					}
+
+					if(strstr(recv_buf, "./file upload") != NULL)
+					{
+						upload_file(hanshin_member_list[i].student_socket);
+
+						break;
+					}
+
+					if(strstr(recv_buf, "./exit") != NULL) //클라이언트 연결종료 서비스.//
+					{
+						memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+						pop_service_Client(hanshin_member_list[i].student_socket); //클라이언트 중 한명이 종료요청(escape)하면
+						//그 클라이언트를 제거.//
+						break;
+					}
+
+					if(strstr(recv_buf, "./view") != NULL) //현재 접속되어있는 멤버정보 옵션.//
+					{
+						memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+						List_View(hanshin_member_list[i].student_socket);
+
+						break;
+					}
+
+					if(strstr(recv_buf, "./insert game") != NULL)
+					{
+						memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+						strcpy(send_buf, "Welcome to Hanshin Service(Game)!!\n\n");
+						strcat(send_buf, "*************************<Reserved commands>***********************\n");
+						strcat(send_buf, "<    ./view      - It shows a list of the students in game rooms. >\n");
+						strcat(send_buf, "<    ./game      - Play the game.                                 >\n");
+						strcat(send_buf, "*******************************************************************\n");
+						strcat(send_buf, "----------------------------------------\n");
+						
+						write(hanshin_member_list[i].student_socket, send_buf, strlen(send_buf));
+
+						memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+						//인원수 검사 및 게임방 입장정보 등록.//
+						int game_people_count = game_insert_room(hanshin_member_list[i].student_socket);
+
+						sleep(1);
+
+						if(game_people_count > 3)
+						{
+							memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+							//방 인원이 다 찼으면 0을 전달.//
+							send_len = write(hanshin_member_list[i].student_socket, "0\n", strlen("0\n"));
+
+							if(send_len == -1)
+							{
+								fprintf(stderr, "write() error\n");
+								exit(1);
+							}
+						}
+
+						else
+						{
+							memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+							//방 인원에 여유가 있으면 1을 반환.//
+							send_len = write(hanshin_member_list[i].student_socket, "1\n", strlen("1\n"));
+
+							if(send_len == -1)
+							{
+								fprintf(stderr, "write() error\n");
+								exit(1);
+							}
+
+							//현재 소켓 리스트에서 분리되고, 게임 소켓리스트로 이동.//
+							printf("Game room entry!! \n");
+						}
+					}
+
+					else //체팅 데이터 경우.//
+					{
+						//받은 데이터를 다시 모든 접속 중인 클라이언트에게 브로드 캐스팅.//
+						for(j=0; j<MAX_HANSHIN_MEMBER; j++)
+						{
+							//무효한 소켓이 아니면 전송. 채팅 데이터인 경우.//
+							if(hanshin_member_list[i].student_socket != INVALID_SOCK)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								//체팅 데이터는 따로 체팅 데이터에 복사.//
+								strcpy(chatData, recv_buf);
+
+								write(hanshin_member_list[j].student_socket, chatData, strlen(chatData)); //체팅 데이터 전송.//
+							}
+						}
+					
+					}
+				}
+			}
+
+			//게임부분에 대한 리스트 이벤트 처리 부분.//
+		}
+	}
+
+	close(serv_sock);
+}
+////////////////////////////////
+int Check_Info(char *input_password)
+{
+	int i;
+	int check_value;
+	char *server_password = NULL; //서버 비밀번호.//
+	char *student_number = NULL;
+
+	server_password = (char *)malloc(strlen("Input")+1);
+	strcpy(server_password, "1234Hanshin"); //비밀번호는 1234Hanshin.//
+
+	student_number = (char *)malloc(strlen("Input")+1);
+
+	//인증번호 비교.//
+	if(strcmp(server_password, input_password) == 0)
+	{
+		check_value = 1;
+	}
+
+	return check_value;
+}
+////////////////////////////////
+int game_insert_room(int select_socket)
+{
+	int room_people_count = 0;
+
+	printf("select socket : %d\n", select_socket);
+
+	return 1;
+}
+////////////////////////////////
+void list_print(int select_socket)
+{
+	int i;
+	char send_buf[BUFSIZ];
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(select_socket == hanshin_member_list[i].student_socket) //플렉싱 방식에서의 임계영역 설정부분.//
+		{
+			service_file_List(select_socket,send_buf); //파일 하나에 대한 정보를 설정.//
+
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			break;
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+}
+////////////////////////////////
+void List_View(int select_socket)
+{
+	int i;
+	char send_buf[BUFSIZ];
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(select_socket == hanshin_member_list[i].student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+		{
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+			{
+				if(hanshin_member_list[i].student_socket != INVALID_SOCK)
+				{
+					sprintf(send_buf, "[%s] %s", hanshin_member_list[i].student_info, member_ship);
+				}
+
+				else
+				{
+					sprintf(send_buf, "[%s]", not_people);
+				}
+
+				strcat(send_buf, "\n");
+
+				write(select_socket, send_buf, strlen(send_buf));
+
+				memset(send_buf, 0, sizeof(char)*BUFSIZ);
+			}
+
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			break;
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+}
+////////////////////////////////
+void download_file(int select_socket)
+{
+	char message[] = "\n* Download file name: (<download file name> -install)\n";
+
+	char recv_file_command[BUFSIZ]; //파일의 이름을 저장할 변수.//
+	char send_file_content[BUFSIZ]; //파일에 내용을 담을 변수.//
+	int recv_len;
+	int send_len;
+	char *tok;
+	char *file_name;
+	char *download_file_name;
+	char *delim = " "; //띄어쓰기가 구분자.//
+	int i,j;
+	char chracter;
+	int buffer_count = 0;
+
+	FILE *file_pointer = NULL;
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(select_socket == hanshin_member_list[i].student_socket)
+		{
+			memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+			memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+			file_name = (char *)malloc(strlen("Input")+1);
+			download_file_name = (char *)malloc(strlen("Input")+1);
+
+			printf("file download Service...\n");
+
+			send_len = write(select_socket, message, strlen(message));
+
+			if(send_len == -1)
+			{
+				fprintf(stderr, "write() error\n");
+				exit(1);
+			}
+ 
+			memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+			memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+			//파싱을 통해 다운로드 파일명 분리.//
+			recv_len = read(select_socket, recv_file_command, BUFSIZ);
+
+			if(recv_len == -1)
+			{
+				fprintf(stderr, "read() error\n");
+				exit(1);
+			}
+
+			tok = strtok(recv_file_command, delim);
+
+			printf("%s\n", tok);
+
+			while(tok != NULL)
+			{
+				//두번째로 분리되는 것은 파일이름이다./
+				strcpy(file_name, tok);
+				tok = strtok(NULL, delim);
+				break;
+			}
+
+			printf("download file name : %s\n", file_name);
+			
+			int size = strlen(file_name)-1;
+
+			for(i=0; i<size; i++)
+			{
+				download_file_name[i] = file_name[i];
+			}
+	
+			//해당 파일을 오픈한다.//
+			if((file_pointer = fopen(file_name, "r")) == NULL)
+			{
+				printf("file open error\n");
+
+				memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+
+				write(select_socket, "file is not exist...", strlen("file is not exist..."));
+
+				break;
+			}
+
+			else
+			{
+				memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+				memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+				//파일에 데이터를 읽어온다.//
+				while((chracter = fgetc(file_pointer)) != EOF)
+				{
+					 send_file_content[buffer_count] = chracter;
+
+					 buffer_count++; //버퍼에 저장하기 위해서 다음 버퍼로 이동한다.//
+				}
+
+				strcat(send_file_content, "\n");
+
+				send_file_content[strlen(send_file_content)+1] = '\0';
+
+				//파일의 데이터를 전송한다.//
+				write(select_socket, send_file_content, strlen(send_file_content));
+
+				memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+				fclose(file_pointer); //파일 종료.//
+
+				//이 부분에서 FTP로그 파일을 개방한다.//
+				if((FTP_logfile_pointer = fopen("ftp_logfile.txt", "a")) == NULL)
+				{
+					fprintf(stderr, "ftp logfile open error\n");
+					exit(1);
+				}
+
+				printf("ftp log file open success...\n");
+
+				for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+				{
+					if(select_socket == hanshin_member_list[i].student_socket)
+					{
+						//임계영역.//
+						timer = time(NULL); //시간초기화.//
+						t = localtime(&timer); //현재 시간으로 초기화.//
+
+						fputs("[FTP Service ", FTP_logfile_pointer);
+						fprintf(FTP_logfile_pointer, "%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+						fprintf(FTP_logfile_pointer, " %s", hanshin_member_list[i].student_info);
+						fputs(" ", FTP_logfile_pointer);
+						fputs(download_file_name, FTP_logfile_pointer);
+						fputs(" [", FTP_logfile_pointer);
+						fputs("download]",  FTP_logfile_pointer);
+						fputs("\n", FTP_logfile_pointer);
+
+						break;
+					}
+				}
+
+				fclose(FTP_logfile_pointer);
+
+				break;
+			}
+
+			memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+
+			break;
+		}
+
+		memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+		memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+	}
+
+}
+/////////////////////////////////
+void upload_file(int select_socket)
+{
+	int i;
+	char upload_file_name_check[BUFSIZ];
+	char upload_file_name[BUFSIZ];
+	char upload_file_content[BUFSIZ];
+	int send_len;
+	int recv_len;
+
+	FILE *upload_file_pointer = NULL;
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(select_socket == hanshin_member_list[i].student_socket)
+		{
+			memset(upload_file_name_check, 0, sizeof(char)*BUFSIZ);
+
+			recv_len = read(select_socket, upload_file_name_check, strlen("success"));
+
+			printf("result : %s\n", upload_file_name_check);
+		
+			if(recv_len == -1)
+			{
+				fprintf(stderr, "read() error\n");
+
+				exit(1);
+			}
+
+			/*if(strcmp(upload_file_name, "file is not exist...") == 0)
+			{
+				printf("file is not exist...\n");
+
+				memset(upload_file_name, 0, sizeof(char)*BUFSIZ);
+				memset(upload_file_content, 0 ,sizeof(char)*BUFSIZ);
+
+				break;
+			}*/
+
+			if(strcmp(upload_file_name_check, "success") == 0)
+			{		
+				sleep(1); //전송단과 상황을 맞게 한다.//	
+	
+				recv_len = read(select_socket, upload_file_name, BUFSIZ);
+
+				if(recv_len == -1)
+				{
+					fprintf(stderr, "read() error\n");
+
+					exit(1);
+				}
+
+				upload_file_name[recv_len] = '\0';
+
+				printf("upload file : %s\n", upload_file_name);
+
+				sleep(1);
+
+				recv_len = read(select_socket, upload_file_content, BUFSIZ);
+
+				if(recv_len == -1)
+				{
+					fprintf(stderr, "read() error\n");
+				}
+
+				upload_file_content[recv_len] = '\0';
+
+				printf("%s\n", upload_file_content);
+
+				//업로드 파일은 올린사람이 정한 파일 이름 그대로 올려야 한다.//
+				if((upload_file_pointer = fopen(upload_file_name, "w")) == NULL)
+				{
+					fprintf(stderr, "file open error\n");
+
+					break;
+				}
+
+				if((FTP_logfile_pointer = fopen("ftp_logfile.txt", "a")) == NULL)
+				{
+					fprintf(stderr, "ftp logfile open error\n");
+					exit(1);
+				}
+
+				else
+				{
+					//파일에 데이터를 쓴다.//
+					fprintf(upload_file_pointer, upload_file_content, strlen(upload_file_content));
+
+					//임계영역.//
+					timer = time(NULL); //시간초기화.//
+					t = localtime(&timer); //현재 시간으로 초기화.//
+
+					fputs("[FTP Service ", FTP_logfile_pointer);
+					fprintf(FTP_logfile_pointer, "%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+					fprintf(FTP_logfile_pointer, " %s", hanshin_member_list[i].student_info);
+					fputs(" ", FTP_logfile_pointer);
+					fputs(upload_file_name, FTP_logfile_pointer);
+					fputs(" [", FTP_logfile_pointer);
+					fputs("upload]",  FTP_logfile_pointer);
+					fputs("\n", FTP_logfile_pointer);
+
+					fclose(upload_file_pointer);
+					fclose(FTP_logfile_pointer);
+
+					memset(upload_file_name, 0, sizeof(char)*BUFSIZ);
+					memset(upload_file_content, 0 ,sizeof(char)*BUFSIZ);
+
+					break;
+				}
+			}
+		}
+	}
+}
+/////////////////////////////////
+void service_file_List(int select_sock, char send_buf[])
+{
+	struct dirent *dp; //파일과 디렉터리 관련 여러 정보를 가지고 있는 구조체.//
+	DIR *dirp; //디렉터리를 가리킬 수 있는 타입.//
+	struct stat status; //파일에 대해서 세부적인 정보를 알 수 있는 구조체정보.//
+
+	int file_size = 0; //파일 사이즈가 저장될 변수.//
+	char file_size_buf[BUFSIZ];
+	int send_len = 0;
+	char *time; //날짜 관련 변수.//
+	char time_buf[BUFSIZ]; 
+	int inode;
+
+	if((dirp = opendir(".")) == NULL) //해당 디렉터리를 오픈해서 파일의 정보를 불러온다.//
+	{
+		fprintf(stderr, "opendir() error\n");
+		exit(1);
+	}
+
+	//디렉터리 내에 있는 파일을 읽는다.//
+	while((dp = readdir(dirp)) != NULL)
+	{
+		//stat를 이용해서 파일의 세부정보를 알아온다.//
+		if(stat(dp->d_name, &status) < 0)
+		{
+			fprintf(stderr, "stat() error\n");
+			exit(1);
+		}
+
+		inode = (int)dp->d_ino; //아이노드 데이터 추출.//
+		sprintf(send_buf, "%d", inode); //10진법의 숫자를 문자열로 변환.//
+		
+		file_size = (int)status.st_size;
+
+		//시간정보 추출.//
+		time = ctime(&status.st_ctime); //시간정보 기록.//
+
+		strcat(send_buf, " ");
+		time[24] = ' ';
+
+		strcat(send_buf, time);
+
+		//파일크기 정보.//
+		strcat(send_buf, " ");
+		sprintf(file_size_buf, "%d", (int)status.st_size);
+		strcat(send_buf, file_size_buf);
+
+		//파일이름 정보. 히든파일 개념은 숨긴다.//
+		strcat(send_buf, " ");
+
+		if(strcmp(dp->d_name, "hanshin_server.c") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "hanshin_server") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "hanshin_server.c~") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, ".") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "..")==0)
+		{
+			continue;
+		}
+		
+		if(strcmp(dp->d_name, "ftp_logfile.txt~") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "ftp_logfile.txt") == 0)
+		{
+			continue;
+		}
+
+		else
+		{
+			strcat(send_buf, dp->d_name);
+		}
+
+		send_buf[strlen(send_buf)] = '\0';
+
+		strcat(send_buf, "\n");
+
+		write(select_sock, send_buf, strlen(send_buf));
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+
+	closedir(dirp);
+}
+/////////////////////////////////
+int push_service_Client(int c_socket, char *stu_info)
+{
+	int i;
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	char *in_student_name = NULL;
+	char *token;
+	char *delim = " "; //띄어쓰기가 구분자.//
+	char *password;
+	char *student_number;
+	int check_value; //인증성공 유무 변수.//
+	int token_count=0;
+
+	int recv_len;
+
+	in_student_name = (char *)malloc(strlen("Input")+1);
+	password = (char *)malloc(strlen("Input")+1);
+	student_number = (char *)malloc(strlen("Input")+1);
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(hanshin_member_list[i].student_socket == INVALID_SOCK)
+		{
+			memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			//이 부분은 현재 확실히 초과가 되지 않는 부분이므로 학생의 정보를 저장.//
+			recv_len = read(c_socket, recv_buf, BUFSIZ);
+
+			if(recv_len == -1)
+			{
+				fprintf(stderr, "read() error\n");
+				exit(1);
+			}
+
+			recv_buf[recv_len] = '\0';
+	
+			//정보유지를 위해 저장.//
+			//최초 전달되는 데이터에 비밀번호를 보고 등록여부를 결정한다.//
+			//마지막에 분리되는것이 비밀번호이다.//
+			token = strtok(recv_buf, delim);
+
+			while(token != NULL)
+			{
+				token_count++;
+
+				strcpy(password, token);
+
+				token = strtok(NULL, delim); //다음 구분자로 분리.//
+
+				if(token_count == 1)
+				{
+					strcpy(student_number, token);
+				}
+			}
+	
+			//서버의 접속을 위해서 비밀번호 검사.//
+			check_value = Check_Info(password);
+
+			if(check_value == 0) //0이면 인증 실패.//
+			{
+				i=-2; //-2를 반환.//
+
+				return i;
+			}
+
+			else if(check_value == 1) //1이면 인증성공.//
+			{
+				hanshin_member_list[i].student_info = (char *)malloc(strlen("Input")+1);
+	
+				sprintf(hanshin_member_list[i].student_info, "%s %s", student_number, recv_buf);
+
+				//strcpy(hanshin_member_list[i].student_info, recv_buf);
+				strcpy(in_student_name, recv_buf);
+
+				printf("[chat] student info : %s Connect...\n", hanshin_member_list[i].student_info);
+			
+				memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+
+				hanshin_member_list[i].student_socket = c_socket;
+
+				memset(send_buf, 0, sizeof(char)*BUFSIZ);
+			     
+				//전송버퍼 초기화. 다른 클라이언트에게도 알리기 위한것./
+				for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+				{	               
+					if(hanshin_member_list[i].student_socket != INVALID_SOCK)		      
+					{        
+						strcat(send_buf, "\n");
+		
+						sprintf(send_buf, "[%s %s] %s",student_number, in_student_name,in_message);
+					
+						strcat(send_buf, "\n");
+					
+						write(hanshin_member_list[i].student_socket, send_buf, strlen(send_buf));
+					}
+				}
+			 	
+				memset(send_buf, 0, sizeof(char)*BUFSIZ);
+				memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+		
+				i=0; //0이면 인증 및 접속 성공.//
+
+				return i;
+			}
+		}
+	}
+
+	if(i==MAX_HANSHIN_MEMBER)
+	{
+		i=-1; //-1이면 서버 접속 불가.//
+
+		return i;
+	}
+}
+////////////////////////////////////
+int pop_service_Client(int select_socket)
+{
+	int i,j;
+	char chat_buf[BUFSIZ];
+
+	close(select_socket); //소켓을 닫는다. 종료.//
+
+	for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+	{
+		if(select_socket == hanshin_member_list[i].student_socket)
+		{
+			hanshin_member_list[i].student_socket = INVALID_SOCK; //해당 소켓을 다시 -1로 만든다.//
+			
+			strcat(chat_buf, "\n");
+			sprintf(chat_buf, "[%s] %s", hanshin_member_list[i].student_info, out_message);
+			strcat(chat_buf, "\n");
+		
+			memset(hanshin_member_list[i].student_info, 0, sizeof(char)*20); //정보 초기화.//
+
+			for(j=0; j<MAX_HANSHIN_MEMBER; j++) //다른 클라이언트에게 나갔다는 메시지 전달.//
+			{
+				if(hanshin_member_list[j].student_socket != INVALID_SOCK)
+				{
+					write(hanshin_member_list[j].student_socket, chat_buf, strlen(chat_buf));
+
+					//memset(chat_buf, 0, sizeof(char)*BUFSIZ);
+				}
+			}
+
+			break;
+		}
+	}
+
+	return 0;
+}
+//////////////////////////////////////
+void sig_handler(int signum)
+{
+	if(signum == SIGINT) //Ctrl+C키를 눌렀을 경우 처리.//
+	{
+		fflush(stdout);
+
+		int i;
+		char chat_buf[BUFSIZ];
+
+		//모든 연결된 맴버에게 종료 알림을 한다.//
+		for(i=0; i<MAX_HANSHIN_MEMBER; i++)
+		{
+			sprintf(chat_buf, "\n%s\n", server_out_message);
+
+			write(hanshin_member_list[i].student_socket, chat_buf, strlen(chat_buf));
+
+			memset(chat_buf, 0, sizeof(char)*BUFSIZ);
+		}
+
+		printf("\n");
+
+		close(serv_sock);
+
+		exit(1); //서버가 종료된다.//
+	}
+}

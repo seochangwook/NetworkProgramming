@@ -1,0 +1,163 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+#include<sys/resource.h> //getrlimit시스템 콜 사용.//
+#include<sys/ioctl.h>
+#include<net/if.h>
+
+//클라이언트에서는 단순히 dns정보를 받는것이므로 특별한 서비스는 아직없다.//
+//사용자에게 정보를 알려주는 help기능의 함수.//
+void help_function();
+/////////////////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	//데이터 송수신 부분.//
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+
+	//소켓관련 변수.//
+	struct sockaddr_in serv_addr; //클라이언트는 서버의 주소만 필요하다.//
+	int sock;
+
+	//서비스 관련 변수.//
+
+	//인수체크. IP주소와 포트번호가 필요.//
+	if(argc != 3)
+	{
+		fprintf(stderr, "Usage : %s <IP> <port>\n", argv[0]);
+		exit(1);
+	}
+
+	//소켓생성.//
+	sock = socket(PF_INET, SOCK_STREAM, 0);
+
+	if(sock == -1)
+	{
+		fprintf(stderr, "socket() error\n");
+		exit(1);
+	}
+
+	//주소설정.//
+	memset(&serv_addr, 0, sizeof(serv_addr));
+	serv_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_port = htons(atoi(argv[2]));
+
+	//서버에 연결요청을 시도.//
+	if(connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
+	{
+		fprintf(stderr, "connect() error\n");
+		exit(1);
+	}
+
+	else
+	{
+		printf("\n***********************\n");
+		printf("* \033[0%dmDNS Service Program\033[0m *\n", 33);
+		printf("***********************\n");
+		//현재 접속된 서버의 주소를 알려준다.강조를 위해서 색갈을 다르게 한다.//
+		printf("\n\033[%dmConnect Server ...(Wait for 2 seconds)\033[0m\n\n", 36);
+
+		sleep(2); //2초에 접속대기시간이 주어진다.//
+
+		printf("\033[%dmConnected Server IP : %s\033[0m", 31, inet_ntoa(serv_addr.sin_addr));
+		printf("\n( >help : Program Info )");
+	}
+
+	puts("\n");
+	//데이터 송수신.//
+	//클라이언트에서는 먼저 도메인 주소를 서버에 질의하고, 그 결과를 서버로 부터 전송만 받으면 된다.//
+	//클라이언트는 사용자가 exit를 눌렀을 경우 서비스를 종료하게 된다.//
+	while(1)
+	{
+		printf(">");
+
+		if(fgets(recv_buf, sizeof(recv_buf), stdin) != NULL) //무엇인가가 입력이 들어왔을 경우.(표준입력)//
+		{	
+			recv_buf[strlen(recv_buf)] = '\0';
+
+			//종료조건 정의.//
+			if(strcmp(recv_buf, "quit\n")==0 || strcmp(recv_buf, "q\n")==0)
+			{
+				printf("Service End ...\n");
+
+				break;
+			}
+
+			//help옵션 정의.//
+			if(strcmp(recv_buf, "help\n") == 0)
+			{
+				help_function(); //사용자에게 프로그램 정보를 알려주는 부분.//
+			}
+
+			else //일반적인 데이터가 들어왔을 시.//
+			{
+				//서버로 도메인 정보를 전송.//
+				send_len = write(sock, recv_buf, strlen(recv_buf)-1);
+	
+				if(send_len == -1)
+				{
+					fprintf(stderr, "write() error\n");
+					exit(1);
+				}
+
+				//서버로 부터 1초뒤 데이터를 전송받는다. 1초를 준 이유는 서버에서 충분히 처리할 시간을 주는것.//
+				sleep(1);
+
+				recv_len = read(sock, recv_buf, BUFSIZ);
+
+				if(recv_len == -1)
+				{
+					fprintf(stderr, "read() error\n");
+					exit(1);
+				}
+
+				//서버로 부터 전송받은 DNS정보를 출력한다.//
+				printf("\n%s", recv_buf);
+
+				//다시 새로운 정보를 받기위해 초기화.//
+				memset(recv_buf, 0, sizeof(char)*BUFSIZ);
+			}
+		}
+	}
+
+	close(sock); //클라이언트 관련 소켓종료.//
+
+	return 0;
+}
+////////////////////////////
+void help_function()
+{
+	//현 프로그램에 대한 설명을 해준다.//
+	printf("\n\033[%dm**< DNS Service Info >**\033[0m\n", 36);
+	printf("1. Users can query the desired domains, IP addresses on the server.\n");
+	printf("2. The server makes available information about the contents which the user query.\n");
+	printf("3. It has the best efficiency for the server to a user query.\n");
+	printf("4. If you can not find the domain server displays the NXDOMAIN.\n"); 
+	printf("\n\033[%dmUsage : > <query domain or ip address> || <help> || <quit> || <q>\033[0m\n", 35);
+	printf("\nThank you\n\n");
+}

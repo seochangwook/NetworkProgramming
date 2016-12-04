@@ -1,0 +1,1912 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<dirent.h> //DIR 포인터 변수랑 연동되는 구조체 헤더파일.//
+#include<sys/types.h> //여러 타입을 정의.//
+#include<fcntl.h> //파일디스크립터를 제어.//
+#include<unistd.h> //여려가지 설정관련한 시스템 콜이 포함.//
+#include<sys/stat.h> //파일, 디렉터리의 정보를 포함하는 시스템 콜이 포함.//
+#include<time.h> //시간에 따른 시스템 콜.//
+#include<signal.h> //시그널 관련 시스템 콜.//
+#include<pthread.h> //스레드 관련 시스템 콜. -lpthread 링커옵션 필요.//
+#include<errno.h> //에러처리에 관한 시스템 콜.//
+#include<pwd.h> // /etc/passwd관련한 시스템 콜이 들어있는 헤더파일.//
+#include<grp.h> // /etc/group관련 시스템 콜이 들어있는 헤더파일.//
+#include<math.h> //수학연산 라이브러리 헤더파일 -lm을 가지고 컴파일 필요.//
+#include<sys/time.h> //시간관련 시스템 콜 관련 라이브러리.//
+#include<sys/wait.h>
+#include<netinet/in.h>
+#include<sys/socket.h> //소켓관련 라이브러리 함수.//
+#include<netdb.h> //포트,서비스 정보관련 라이브러리 함수.//
+#include<arpa/inet.h> //IP주소에 대해서 변환함수를 가지고 있는 라이브러리.//
+#include<netinet/ip.h> //RAW소켓 사용 시 ip의 헤더정보를 위한 라이브러리.//
+#include<netinet/tcp.h> //RAW소켓 사용 시 tcp의 헤더정보를 위한 라이브러리.//
+#include<netinet/ip_icmp.h> //RAW소켓 사용 시 ICMP의 헤더정보를 위한 라이브러리.//
+#include<netinet/in_systm.h>
+
+#define MAX_GAME_MEMBER 3 //최대 접속 클라이언트 수 정의.//
+#define INVALID_SOCK -1 //현재 사용되어지지 않는 무효한 소켓.//
+///////////////////////
+//소켓관련 변수. 전역변수로 해야지 시그널 처리 가능.//
+int serv_sock;
+///////////////////////
+//시간관련 구조체. 시간정보는 여러 로그파일에서 사용되므로 전역변수로 선언.//
+struct tm *t; //시간관련 구조체.//
+time_t timer; //시간측정 변수.//
+
+FILE *FTP_logfile_pointer = NULL; //FTP관련 로그파일.//
+
+////////////////////
+//참가인원 수(전역변수.)//
+int people_count = 0;
+//게임가능 여부변수.//
+int check_game_play = 0; //max3명이 다 차면 이 값은 1로 변경.//
+//게임에서 사용될 전역변수 들.//
+int lower_betting_money = 0; //최종 배팅 금액.//
+int total_betting_count = 0; //3명이니 총 9번의 카운트면 베팅종료.//
+int user_1_turn = 4; //4는 첫번째 유저의 턴.//
+int user_2_turn = 5; //5는 두번째 유저의 턴.//
+int user_3_turn = 6; //6은 세번째 유저의 턴.// 
+//////////////////////
+//카드게임 정보.//
+int card_integer_one;
+int card_integer_two;
+int card_integer_bet;
+//////////////////////
+//게임 관련 구조체 선언.//
+typedef struct Game_people
+{
+	char *game_student_info; //학생정보.//
+	int game_student_socket; //접속 소켓.//
+	int batting_money; //배팅금액.//
+	int batting_count; //배팅카운트.//
+}Game_people;
+
+Game_people game_people_list[MAX_GAME_MEMBER]; //정보를 담은 구조체 배열정의.//
+////////////////////////////
+int ready_list[MAX_GAME_MEMBER]; //레디관련 배열.//
+//////////////////////////////
+char CODE200[] = "This person is full. Please connect again later\n";
+char CODE300[] = "The Service does not exist\n";
+char greeting[] = "Welcome\n";
+char member_ship[] = "Student connect";
+char not_people[] = "Empty";
+char out_message[] = "Student Game room out...\n";
+char ready_message[] = "Ready!!";
+char not_ready_message[] = "Not Ready";
+char server_out_message[] = "Hanshin game server exit... (All Connection Fail)\nPlease connect again later\n";
+char in_message[] = "Student Game room entry...\n";
+char not_secure_message[] = "Access password, stunumber is incorrect. Please check again (ref Hanshin University website)\n";
+char escape[] = "./exit";
+////////////////////////////
+void List_View(int select_socket);
+void ready_game_room(int select_socket);
+void game_end();
+void card_num_shuffle(); //카드셔플.//
+void betting(int select_socket, int money); //베팅함수.//
+int parsing(char *buf_message, int buf_size);
+void result_service(); //결과를 반환하는 함수.//
+void init_value(); //다음 게임을 위해서 초기화 해주는 함수.//
+void save_win_lose_file(char *win_people, char *lose_people); //파일에 저장.//
+void save_game_logfile(); //게임 로그파일 저장.//
+void rank_View(int select_socket); //랭킹함수.(로그파일에서 데이터를 추출)//
+void Print_Manual(int select_socket); //프로그램 메뉴얼 함수.//
+void download_file(int select_socket); //다운로드 기능.//
+void upload_file(int select_socket); //업로드 기능.//
+void list_print(int select_socket); //파일 리스트 출력.//
+void service_file_List(int clnt_sock, char send_buf[]); //서비스 리스트.//
+int Check_Info(char *input_password); //인증검사 함수.//
+int Check_Info_2(char *input_student_number); //인증검사(학번)//
+////////////////////////////
+//시그널 처리 함수.//
+void sig_handler(int signum);
+////////////////////////////
+int main(int argc, char *argv[], char *envp[])
+{
+	int c_socket, s_socket;
+
+	struct sockaddr_in s_addr, c_addr; //서버와 클라이언트들의 주소를 설정할 구조체.//
+
+	int len;
+	int nfds = 0;
+	int i,j,n;
+	int loop;
+	int m;
+
+	fd_set read_fds; //읽기소켓 목록을 나타내는 read_fds정의.//
+
+	char chatData[BUFSIZ]; //체팅 데이터가 저장 될 데이터 배열.//
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];
+	int recv_len;
+	int send_len;
+	int res;
+
+	//문자열 분리 함수.//
+	char *token = NULL;
+	char *delim = " ";
+	char *money = NULL;
+
+	money = (char *)malloc(strlen("Input")+1);
+
+	//시그널 관련 부분.//
+	struct sigaction act;
+
+	act.sa_handler = sig_handler;
+	act.sa_flags = SA_RESTART;
+	sigfillset(&act.sa_mask);
+
+	sigaction(SIGINT, &act, NULL); //시그널 적용.//
+
+	if(argc < 2)
+	{
+		printf("usage : %s port_number\n", argv[0]);
+
+		exit(-1);
+	}
+
+	s_socket = socket(PF_INET, SOCK_STREAM, 0); //IPV4와 TCP유형으로 소켓 생성.//
+
+	memset(&s_addr, 0, sizeof(s_addr)); //s_addr의 구조체를 설정하기 위해서 우선 초기화.//
+	s_addr.sin_addr.s_addr = htonl(INADDR_ANY); //모든 IP를 다 받는다.//
+	s_addr.sin_family = AF_INET; //IPV4의 구조.//
+	s_addr.sin_port = htons(atoi(argv[1])); //포트를 설정.//
+
+	//설정한 포트를 소켓과 결합.//
+	if(bind(s_socket, (struct sockaddr *)&s_addr, sizeof(s_addr)) == -1)
+	{
+		printf("Can not Bind\n");
+
+		return -1;
+	}
+
+	//backlog값을 MAX_CLIENT로 주면 최대 목록의 수는 10개의 소켓목록이 저장될 수 있다.//
+	if(listen(s_socket, MAX_GAME_MEMBER == -1))
+	{
+		printf("listen Fail\n");
+
+		return -1;
+	}
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		game_people_list[i].game_student_socket = INVALID_SOCK; //현재 최대 클라이언트까지 모든 소켓을 우선 무효한 소켓으로 만든다.//
+	}
+
+	while(1)
+	{
+		nfds = s_socket;
+
+		FD_ZERO(&read_fds); //연결소켓 목록이 저장될 버퍼를 0으로 초기화.//
+		FD_SET(s_socket, &read_fds); //서버소켓을 등록.//
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(game_people_list[i].game_student_socket != INVALID_SOCK) //무효한 소켓이 아닌경우.//
+			{
+				FD_SET(game_people_list[i].game_student_socket, &read_fds); //연결소켓 목록에 설정.//
+
+				if(game_people_list[i].game_student_socket > nfds)
+				{
+					nfds = game_people_list[i].game_student_socket;
+				}
+			}
+		}
+
+		nfds++;
+
+		//데이터 수신등의 이벤트가 발생할때 까지 select에서 대기.//
+		if(select(nfds, &read_fds, (fd_set *)0, (fd_set *)0, (struct timeval *)0) < 0)
+		{
+			exit(1);
+		}
+
+		//현재 발생한 이벤트가 무엇인지 검사.//
+		if(FD_ISSET(s_socket, &read_fds)) //이 경우는 새로운 연결을 요청하는 클라이언트가 있을 경우.//
+		{
+			len = sizeof(c_addr);
+
+			//연결요청으로 들어온 소켓에 대해서 accept로 처리.//
+			if((c_socket = accept(s_socket, (struct sockaddr *)&c_addr, &len)) > 0)
+			{
+				//연결된 이후에 사용자의 정보(학번, 이름, 서버 인증번호)을 받아온다.//
+				res = pushClient(c_socket); //현재의 통신을 하고자 하는 소켓을 클라이언트 목록에 추가.//
+
+				if(res == -1) //0보다 작다는건 에러 즉 최대 클라이언트의 개수를 초과 시.//
+				{
+					write(c_socket, CODE200, strlen(CODE200)); //CODE200의 문자를 보낸다.//
+					
+					close(c_socket); //소켓을 닫는다.//
+				}
+
+				else if(res == 0) //연결이 가능하다면 환영인사 문구를 전송.//
+				{
+					strcpy(send_buf, "                 Welcome to Hanshin Service(Game)!!\n\n");
+					strcat(send_buf, "*************************<Reserved commands>************************\n");
+					strcat(send_buf, "<    ./view       - It shows a list of the students in game rooms. >\n");
+					strcat(send_buf, "<    ./ready      - User Ready                                     >\n");
+					strcat(send_buf, "<  ./rank view    - It shows the players of the game ranking       >\n");
+					strcat(send_buf, "<./file download  - You can download the desired file              >\n");
+					strcat(send_buf, "< ./file upload   - You can upload the file you want               >\n");
+					strcat(send_buf, "<  ./exit & ^C    - It will be out in the game room.               >\n");
+					strcat(send_buf, "<  ./game start   - Play the game.                                 >\n");
+					strcat(send_buf, "********************************************************************\n");
+					strcat(send_buf, "----------------------------------------\n");
+						
+					write(c_socket, send_buf, strlen(send_buf));
+
+					memset(send_buf, 0, sizeof(char)*BUFSIZ);
+				}
+
+				else if(res == -2) //인증실패.//
+				{
+					write(c_socket, not_secure_message, strlen(not_secure_message));
+
+					close(c_socket);
+				}
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//현재 데이터 수신이 들어온 소켓을 찾기 위해서 비교과정.//
+			//이 경우는 현재 등록되 있는 클라이언트로 부터 체팅 데이터가 발생했을 경우.//
+			if((game_people_list[i].game_student_socket !=  INVALID_SOCK) && FD_ISSET(game_people_list[i].game_student_socket, &read_fds))
+			{
+				memset(chatData, 0, sizeof(char)*BUFSIZ); //데이터를 받기 위해 초기화.//
+
+				//read로 수신버퍼에 있는 내용을 읽어온다.//
+				if((n = read(game_people_list[i].game_student_socket, chatData, BUFSIZ)) > 0)
+				{
+					chatData[n] = '\0';
+
+					//printf("%s", chatData);
+
+					int check_value = parsing(chatData, n);
+
+					//check_value값이 1이면 배팅금액이므로 배팅함수로 적용.//
+					//아니면 일반 체팅, 서비스 데이터로 전송.//
+					if(check_value == 1)
+					{
+						money = (char *)malloc(strlen("Input")+1);
+				
+						token = strtok(chatData, delim);
+					
+						while(token != NULL)
+						{
+							strcpy(money, token);
+							token = strtok(NULL, delim);
+						}
+
+						printf("%s\n", money);
+
+						int user_batting_money = atoi(money);
+
+						printf("%d\n", user_batting_money);
+
+						betting(game_people_list[i].game_student_socket, user_batting_money);
+					}
+
+					else
+					{
+						printf("%s\n", chatData);
+						//받은 데이터를 다시 모든 접속 중인 클라이언트에게 브로드 캐스팅.//
+						for(j=0; j<MAX_GAME_MEMBER; j++)
+						{
+							if(strstr(chatData, escape) != NULL)
+							{
+								popClient(game_people_list[i].game_student_socket); //클라이언트 중 한명이 종료요청(escape)하면
+								//그 클라이언트를 제거.//
+
+								break;
+							}
+
+							if(strstr(chatData, "./file download") != NULL)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								list_print(game_people_list[i].game_student_socket);
+					
+								download_file(game_people_list[i].game_student_socket);
+
+								break;
+							}
+
+							if(strstr(chatData, "./file upload") != NULL)
+							{
+								upload_file(game_people_list[i].game_student_socket);
+
+								break;
+							}
+
+							if(strstr(chatData, "./help") != NULL)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								Print_Manual(game_people_list[i].game_student_socket);
+
+								break;
+							}
+
+							if(strstr(chatData, "./view") != NULL) //현재 접속되어있는 멤버정보 옵션.//
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								List_View(game_people_list[i].game_student_socket);
+
+								break;
+							}
+
+							if(strstr(chatData, "./ready") != NULL)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								ready_game_room(game_people_list[i].game_student_socket); //레디하는 기능.//다
+		
+								break;
+							}
+
+							if(strstr(chatData, "./game start") != NULL)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								if(check_game_play == 1)
+								{
+									if(loop == 0)
+									{
+										for(m=0; m<MAX_GAME_MEMBER; m++)
+										{
+											if(game_people_list[m].game_student_socket != INVALID_SOCK)
+											{
+												strcpy(send_buf, "\nAfter 3 seconds to start the game.\n");
+
+												send_len = write(game_people_list[m].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+											}
+										}
+
+										sleep(1);
+
+										loop++;
+									}
+
+									if(loop == 1)
+									{
+										for(m=0; m<MAX_GAME_MEMBER; m++)
+										{
+											if(game_people_list[m].game_student_socket != INVALID_SOCK)
+											{
+												strcpy(send_buf, "After 2 seconds to start the game.\n");
+
+												send_len = write(game_people_list[m].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+											}
+										}
+
+										sleep(1);
+
+										loop++;
+									}
+
+									if(loop == 2)
+									{
+										for(m=0; m<MAX_GAME_MEMBER; m++)
+										{
+											if(game_people_list[m].game_student_socket != INVALID_SOCK)
+											{
+												strcpy(send_buf, "After 1 seconds to start the game.\n");
+
+												send_len = write(game_people_list[m].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+											}
+										}
+
+										sleep(1); //1초씩 작업이 갱신된다.//
+									}
+
+									loop = 0;
+									//sleep(3); //3초뒤 게임시작.//
+			
+									//게임 로그 파일에 게임 참가 사람들의 정보를 저장.//
+									save_game_logfile();
+
+									//게임 알고리즘.(셔플 -> 배팅 -> 최종결과)//
+									for(i=0; i<MAX_GAME_MEMBER; i++)
+									{
+										//무효한 소켓이 아니면 전송.//
+										if(game_people_list[i].game_student_socket != INVALID_SOCK)
+										{
+											strcpy(send_buf, "Game Start!!\n");
+
+											send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+										}
+									}
+
+									//알고리즘 진행.//
+									for(i=0; i<MAX_GAME_MEMBER; i++)
+									{
+										//무효한 소켓이 아니면 전송.//
+										if(game_people_list[i].game_student_socket != INVALID_SOCK)
+										{
+											strcpy(send_buf, "<< Card Shuffle... >>\n");
+
+											send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+										}
+									}
+
+									sleep(2);
+
+		              					card_num_shuffle(); //카드 정보를 보인다.//
+
+									//알고리즘 진행.//
+									for(i=0; i<MAX_GAME_MEMBER; i++)
+									{
+										//무효한 소켓이 아니면 전송.//
+										if(game_people_list[i].game_student_socket != INVALID_SOCK)
+										{
+											strcpy(send_buf, "<< Betting start... (Chat possible) >>\n");
+
+											send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+										}
+									}
+
+									//게임이 끝나면 바로 참가했던 인원들은 나가게 된다.//
+								}
+
+								else
+								{
+									for(i=0; i<MAX_GAME_MEMBER; i++)
+									{
+										//무효한 소켓이 아니면 전송.//
+										if(game_people_list[i].game_student_socket != INVALID_SOCK)
+										{
+											strcpy(send_buf, "No 3 members...\n");
+
+											send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+										}
+									}
+
+									if(send_len == -1)
+									{
+										fprintf(stderr, "write() error\n");
+									}
+
+									break;
+								}
+							}
+
+							if(strstr(chatData, "./rank view") != NULL)
+							{
+								memset(chatData, 0, sizeof(char)*BUFSIZ);
+
+								rank_View(game_people_list[i].game_student_socket);
+
+								break;
+							}
+
+							//무효한 소켓이 아니면 전송.기본 체팅데이터 분리.//
+							else if(game_people_list[i].game_student_socket != INVALID_SOCK)
+							{
+								write(game_people_list[j].game_student_socket, chatData, n);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+////////////////////////////////
+void Print_Manual(int select_socket)
+{
+	char Manual_info_send_buf[BUFSIZ];
+	int i;
+	int send_len;
+	
+	//메뉴얼 설명.//
+	strcpy(Manual_info_send_buf, "\n                 Hanshin Service Manual(Manual)!!\n\n");
+	strcat(Manual_info_send_buf, "*************************************************************************\n");
+	strcat(Manual_info_send_buf, "1. Hanshin University students can take advantage of the service         \n");
+	strcat(Manual_info_send_buf, "2. Services available are the game                                       \n");
+	strcat(Manual_info_send_buf, "3. Please enter service at the end of the './exit' command               \n");	
+	strcat(Manual_info_send_buf, "4. To get help for a program, enter the './help'                         \n");
+	strcat(Manual_info_send_buf, "------------------------------ << Game >> -------------------------------\n");
+	strcat(Manual_info_send_buf, "※ The game is 'Korean blackjack'                                         \n");
+	strcat(Manual_info_send_buf, "※ Maximum Number of game three.                                          \n");
+	strcat(Manual_info_send_buf, "※ All three ready-game ought to start is possible.                       \n");
+	strcat(Manual_info_send_buf, "※ The victory or defeat will depend on the bet.                          \n");
+	strcat(Manual_info_send_buf, "※ The command argument to the games 'g$'                                 \n");
+	strcat(Manual_info_send_buf, "------------------------------- << FTP >> -------------------------------\n"); 
+	strcat(Manual_info_send_buf, "※ Users can upload any file to the FTP share.                            \n");
+	strcat(Manual_info_send_buf, "※ Users can download one of the files on the FTP share.                  \n");
+	strcat(Manual_info_send_buf, "※ Peer-to-peer (1:1) is a service of the system.                         \n");
+	strcat(Manual_info_send_buf, "*************************************************************************\n");     
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+		{
+			send_len = write(select_socket, Manual_info_send_buf, strlen(Manual_info_send_buf));
+
+			if(send_len == -1)
+			{
+				fprintf(stderr, "write() error\n");
+				exit(1);
+			}
+		}
+	}
+
+	memset(Manual_info_send_buf, 0, sizeof(char)*BUFSIZ);
+}
+////////////////////////////////
+void list_print(int select_socket)
+{
+	int i;
+	char send_buf[BUFSIZ];
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket) //플렉싱 방식에서의 임계영역 설정부분.//
+		{
+			service_file_List(select_socket,send_buf); //파일 하나에 대한 정보를 설정.//
+
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			break;
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+}
+/////////////////////////////////
+int parsing(char *buf_message, int buf_size)
+{
+	int check_value = 0; //0이면 '$'가 아닌경우.//
+	
+	if(buf_message[1] == '$') //'$'인지 구분.//
+	{
+		check_value = 1;
+	}
+	
+	return check_value;
+}
+////////////////////////////////
+void game_end() //이 부분에 함수는 다시 기존에 게임 리스트에서 소켓을 다시 채팅소켓으로 붙이는 방법.//
+{
+	int i;
+	char send_buf[BUFSIZ];
+	int send_len;
+
+	//레디 상태와 게임배열을 다 해제한다.//
+	//다 -1로 만든다.//
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		strcpy(send_buf, "Game is out...\n");
+
+		send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+
+		game_people_list[i].game_student_socket = INVALID_SOCK; 
+		ready_list[i] = INVALID_SOCK;
+	}
+
+	people_count = 0; //다시 초기화.//
+}
+////////////////////////////////
+void ready_game_room(int select_socket)
+{
+	int send_len;
+	int i;
+	char send_buf[BUFSIZ];
+	int game_array_size;
+
+	if(people_count >= 3) //최대 3명이이상일 경우.//
+	{
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				strcpy(send_buf, "All Ready !!");
+
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+	}
+
+	else //3명이 아니면 레디를 할 수 있다.//
+	{
+		game_array_size = (people_count+1);
+
+		printf("people size : %d\n", game_array_size);
+
+		sprintf(send_buf, "%d", game_array_size); //배열을 만든다.//
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(select_socket == game_people_list[i].game_student_socket) //플렉싱 방식에서의 임계영역 설정부분.//
+			{
+				ready_list[people_count] = game_people_list[i].game_student_socket; //배열에 사람을 포함.//
+
+				break;
+			}	
+		}
+
+		for(i=0; i<sizeof(ready_list) / sizeof(int); i++)
+		{
+			printf("%d ",ready_list[i]);
+		}
+
+		//다음 사람을 위해 카운트 증가.//
+		people_count++;
+
+		strcpy(send_buf, "Room is entry...\n");
+
+		send_len = write(select_socket, send_buf, strlen(send_buf)); //전송한다.//
+
+		if(send_len == -1)
+		{
+			fprintf(stderr, "write() error\n");
+		}
+
+		if(people_count == 3)
+		{
+			check_game_play = 1; //1로 변경.//
+		}
+	}
+}
+/////////////////////////////////
+void betting(int select_socket, int money)
+{
+	int i, j;	
+	char send_buf[BUFSIZ];
+	int send_len;
+
+	//베팅금액을 지정해준다.//
+	//최종배팅금액 조정, 각 사용자당 배팅횟수 조정, 배팅 턴수 조정 필요.//
+
+	if(money == 0 || lower_betting_money <= money) //처음에 0원이므로 아무나 다 들어올 수 있다.//
+	{
+		//각 사용자당 베팅횟수와 베팅턴 조정부분.//
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(select_socket == game_people_list[i].game_student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+			{
+				if(game_people_list[i].batting_count == 0) //배팅횟수가 0이되면 베팅을 못하는 메시지.//
+				{
+					strcpy(send_buf, "Your batting count is end...");
+
+					send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+				}
+
+				else
+				{
+					//최저배팅금액 설정. 총 베팅횟수 조정부분.//
+					if(money > 0)
+					{
+						lower_betting_money = money;
+					}
+
+					total_betting_count++;
+
+					game_people_list[i].batting_count --;
+					game_people_list[i].batting_money += money;
+	
+					printf("user[%s] count : %d / bat_money : %d / lower bat_money : %d / tot_bat_count : %d", game_people_list[i].game_student_info,
+	game_people_list[i].batting_count, game_people_list[i].batting_money,lower_betting_money, total_betting_count);
+				}
+
+				break;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket == select_socket)
+			{	
+				for(j=0; j<MAX_GAME_MEMBER; j++)
+				{
+					sprintf(send_buf, "\nuser[%s] batting moeny : %d / batting count : %d / lowest batting money : %d\n",game_people_list[i].game_student_info,  game_people_list[i].batting_money, game_people_list[i].batting_count, lower_betting_money);
+
+				send_len = write(game_people_list[j].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+				}
+
+				break;
+			}
+		}
+	}
+
+	else if(1 <= money && money < lower_betting_money) //0은 배팅을 하지 않는 경우이므로 카운트가 세어져야 한다.//
+	{
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(select_socket == game_people_list[i].game_student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+			{
+				strcpy(send_buf, "\nThe number is less than the minimum bet amount amount. Please re-enter");
+
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+
+				break;
+			}
+		}
+	}
+
+	//최종베팅횟수가 되었는지 판단.-> 이부분에서 최종 9가 되면 결과함수 호출.//
+	if(total_betting_count == 9)
+	{
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				strcpy(send_buf, "\nAnswer is checking...(3 Seconds wait)");
+
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+
+		//함수호출.//
+		sleep(3); //3초뒤 결과반환.//
+
+		result_service(); //승패반환.//	
+
+		//다음 연속된 게임을 위해서 변수 초기화.//
+		init_value();
+	}
+}
+/////////////////////////////////
+void result_service()
+{
+	char send_buf[BUFSIZ];
+   	int send_len;
+   	char card_char_bet[BUFSIZ];
+	int i;
+
+   	//승패저장을 위한 변수 값.//	
+   	int win_count = 1;
+   	int lose_count = 1;
+
+	int win_lose_case; //승패의 경우를 판단하는 변수로 1이면 카드가 정상범위에 있어서 돈을 많이 배팅한 사람이 이기는 경우이고, 
+	//0이면 비정상범위이므로 돈을 많이 배팅한 사람이 이기는 경우이다.//
+
+	int max; //최대값 저장.//
+	int min; //최소값 저장.//
+	
+	char *win_student_name = NULL;
+	char *lose_student_name = NULL;
+
+	FILE *game_info_file_pointer = NULL; //승률 파일.//
+
+	win_student_name = (char *)malloc(strlen("Input")+1);
+	lose_student_name = (char *)malloc(strlen("Input")+1);
+
+   	memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+	if((card_integer_one < card_integer_two) && (card_integer_one < card_integer_bet) && (card_integer_bet < card_integer_two))
+	{
+		sprintf(card_char_bet, "%d", card_integer_bet);
+		strcpy(send_buf,"\n\n**************<< Result >>**************");
+	      	strcat(send_buf, "\n결과 카드 : ");
+	      	strcat(send_buf, card_char_bet);
+	       strcat(send_buf, "\n");
+		strcat(send_buf, "두 카드 숫자 범위안에 포함");
+		strcat(send_buf, "\n");
+
+		win_lose_case = 1;
+	}
+
+	else if((card_integer_one > card_integer_two) && (card_integer_two < card_integer_bet) && (card_integer_bet < card_integer_one))
+	{
+	      sprintf(card_char_bet, "%d", card_integer_bet);
+	      strcpy(send_buf,"\n\n**************<< Result >>**************");
+	      strcat(send_buf, "\n결과 카드 : ");
+	      strcat(send_buf, card_char_bet);
+	      strcat(send_buf, "\n");
+	      strcat(send_buf, "두 카드 숫자 범위안에 포함");
+	      strcat(send_buf, "\n");
+
+	      win_lose_case = 1;
+	}
+
+	else
+	{
+	     sprintf(card_char_bet, "%d", card_integer_bet);
+	     strcpy(send_buf,"\n\n**************<< Result >>**************");
+	     strcat(send_buf, "\n결과 카드 : ");
+	     strcat(send_buf, card_char_bet);
+	     strcat(send_buf, "\n");
+	     strcat(send_buf, "두 카드 숫자 범위 밖");
+	     strcat(send_buf, "\n");
+
+	     win_lose_case = 0;
+	}
+
+	for(i=0; i<MAX_GAME_MEMBER; i++) 
+	{
+	      //무효한 소켓이 아니면 전송.
+	     if(game_people_list[i].game_student_socket != INVALID_SOCK)
+	     {
+		  write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf));
+	     }
+	}
+
+	//win_lose로 승패를 구분한다. 1시 max값이 필요, 0일시 min값이 필요.//
+	if(win_lose_case == 1)
+	{	
+		max = game_people_list[0].batting_money; //승리자.//
+		min = game_people_list[0].batting_money; //패배자.//
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(max < game_people_list[i].batting_money)
+			{
+				max  = game_people_list[i].batting_money;
+			}
+
+			if(min > game_people_list[i].batting_money)
+			{
+				min = game_people_list[i].batting_money;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(game_people_list[i].batting_money == max)
+			{
+				strcpy(win_student_name, game_people_list[i].game_student_info);
+
+				sprintf(send_buf, "Victory people : [%s]\n", win_student_name);
+
+				break;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(game_people_list[i].batting_money == min)
+			{
+				strcpy(lose_student_name, game_people_list[i].game_student_info);
+
+				sprintf(send_buf, "Lose people : [%s]\n", lose_student_name);
+				strcat(send_buf,"******************************************\n");
+
+				break;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+	}
+
+	else if(win_lose_case == 0)
+	{
+		min = game_people_list[0].batting_money; //승리자.//
+		max = game_people_list[0].batting_money; //패배자.//
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(max < game_people_list[i].batting_money)
+			{
+				max  = game_people_list[i].batting_money;
+			}
+
+			if(min > game_people_list[i].batting_money)
+			{
+				min = game_people_list[i].batting_money;
+			}
+		}
+		
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(game_people_list[i].batting_money == min)
+			{
+				strcpy(win_student_name, game_people_list[i].game_student_info);
+
+				sprintf(send_buf, "Victory people : [%s]\n", win_student_name);
+
+				break;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			if(game_people_list[i].batting_money == max)
+			{
+				strcpy(lose_student_name, game_people_list[i].game_student_info);
+
+				sprintf(send_buf, "Lose people : [%s]\n", lose_student_name);
+				strcat(send_buf,"******************************************\n");
+
+				break;
+			}
+		}
+
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//무효한 소켓이 아니면 전송.//
+			if(game_people_list[i].game_student_socket != INVALID_SOCK)
+			{
+				send_len = write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf)); //전송한다.//
+			}
+		}
+	}
+
+	//결과를 로그파일로 저장.//
+	save_win_lose_file(win_student_name, lose_student_name);
+}
+/////////////////////////////////
+void List_View(int select_socket)
+{
+	int i;
+	char send_buf[BUFSIZ];
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+		{
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			for(i=0; i<MAX_GAME_MEMBER; i++)
+			{
+				if(game_people_list[i].game_student_socket == ready_list[i])
+				{
+					sprintf(send_buf, "[%s] %s %s", game_people_list[i].game_student_info, member_ship,ready_message );
+				}
+
+				else if(game_people_list[i].game_student_socket != INVALID_SOCK && game_people_list[i].game_student_socket != ready_list[i])
+				{
+					sprintf(send_buf, "[%s] %s %s",game_people_list[i].game_student_info,member_ship, not_ready_message );
+				}
+
+				else if(game_people_list[i].game_student_socket == INVALID_SOCK)
+				{
+					sprintf(send_buf, "[%s]" , not_people);
+				}
+
+				strcat(send_buf, "\n");
+
+				write(select_socket, send_buf, strlen(send_buf));
+
+				memset(send_buf, 0, sizeof(char)*BUFSIZ);
+			}
+
+			memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+			break;
+		}
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+}
+/////////////////////////////////
+int Check_Info(char *input_password)
+{
+	int i;
+	int check_value;
+	char *server_password = NULL; //서버 비밀번호.//
+	char *student_number = NULL;
+
+	server_password = (char *)malloc(strlen("Input")+1);
+	strcpy(server_password, "1234Hanshin"); //비밀번호는 1234Hanshin.//
+
+	student_number = (char *)malloc(strlen("Input")+1);
+
+	//인증번호 비교.//
+	if(strcmp(server_password, input_password) == 0)
+	{
+		check_value = 1;
+	}
+
+	return check_value;
+}
+///////////////////////////////
+int Check_Info_2(char *input_student_number) //학번비교.//
+{
+	int check_value = 0; //0이면 없다는 가정.//
+
+	FILE *hanshin_file_pointer = NULL; //한신대의 정보를 가지고 있는 파일 포인터.//
+
+	char *student_number = NULL;
+	char *student_name = NULL;
+	char *student_dept = NULL;
+
+	student_number = (char *)malloc(strlen("Input")+1);
+	student_name = (char *)malloc(strlen("Input")+1);
+	student_dept = (char *)malloc(strlen("Input")+1);
+
+	if((hanshin_file_pointer = fopen("Hanshin_db.txt", "r")) == NULL)
+	{
+		fprintf(stderr, "fopen() error\n");
+		exit(1);
+	}
+
+	while(!feof(hanshin_file_pointer)) //파일을 EOF까지 탐색.//
+	{
+		fscanf(hanshin_file_pointer, "%s %s %s\n", student_number, student_name, student_dept);
+
+		if(strcmp(student_number, input_student_number) == 0)
+		{
+			check_value = 1; //학번이 일치하는 경우 1로 변경.//
+
+			break;
+		}
+	}
+
+	return check_value;
+}
+/////////////////////////////////
+void rank_View(int select_socket)
+{
+	FILE *game_log_file_pointer = NULL; //게임 로그파일을 기반으로 승률을 나타냄.//
+	
+	char *student_name = NULL;
+	char *student_num = NULL;
+	char *best_people_info = NULL;
+	char *worst_people_info = NULL;
+	char *total_send_info = NULL;
+	char *date = NULL;
+	char *date_2 = NULL;
+
+	int max_win_point = 0;
+	int max_lose_point = 0;
+	int current_win_point;
+	int current_lose_point;
+	int send_len;
+	int i;
+
+	student_name = (char *)malloc(strlen("Input")+1);
+	student_num = (char *)malloc(strlen("Input")+1); 
+	best_people_info = (char *)malloc(strlen("Input")+1);
+	worst_people_info = (char *)malloc(strlen("Input")+1);
+	total_send_info = (char *)malloc(strlen("Input")+1);
+	date = (char *)malloc(strlen("Input")+1);
+	date_2 = (char *)malloc(strlen("Input")+1);
+
+	if((game_log_file_pointer = fopen("game_log.txt", "r")) == NULL) //로그 파일 개방.//
+	{
+		fprintf(stderr, "fopen() error\n");
+		exit(1);
+	}
+
+	while(!feof(game_log_file_pointer))
+	{
+		fscanf(game_log_file_pointer, "%s %s %s %s %d %d\n", date, date_2, student_name, student_num, &current_win_point, &current_lose_point);
+
+		if(max_win_point <= current_win_point)
+		{
+			max_win_point = current_win_point;
+			sprintf(best_people_info, "%s %s\n", student_num, student_name);
+		}
+
+		if(max_lose_point <= current_lose_point)
+		{
+			max_lose_point = current_lose_point;
+			sprintf(worst_people_info, "%s %s\n", student_num, student_name);
+		}
+	}
+
+	//printf("랭킹1위  : %s", best_people_info);
+	//printf("랭킹꼴지 : %s", worst_people_info);
+
+	sprintf(total_send_info, "\nNo. 1 ranking_p : %sRanking last_p : %s", best_people_info, worst_people_info);
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket) //이벤트가 발생한 해당 소켓에게만 메시지를 보낸다.//
+		{
+			send_len = write(select_socket, total_send_info, strlen(total_send_info));
+
+			if(send_len == -1)
+			{
+				fprintf(stderr, "write() error\n");
+				exit(1);
+			}
+		}
+	}
+}
+/////////////////////////////////
+void card_num_shuffle()
+{
+	char card_num_one[BUFSIZ];
+   	char card_num_two[BUFSIZ];
+   	char card_num_bet[BUFSIZ];
+   	//int number1, number2, number_bet;
+
+   	char send_buf[BUFSIZ];
+   	int send_len;
+	int i;
+
+	memset(send_buf, 0, sizeof(char)*BUFSIZ);
+
+	srand((unsigned)time(NULL)); // 랜덤함수 초기화
+
+	card_integer_one = rand()%12;
+	card_integer_two = rand()%12;
+	card_integer_bet = rand()%12;
+
+	while(1) 
+       {
+	      if((card_integer_one != card_integer_two) && (card_integer_one != card_integer_bet) && (card_integer_two != card_integer_bet))
+	      {
+		  break;
+	      }
+
+	      else 
+	      {
+		  card_integer_one = rand()%12;
+		  card_integer_two = rand()%12;
+		  card_integer_bet = rand()%12;
+	      }
+	} 
+
+	sprintf(card_num_one, "       %d", card_integer_one);
+	sprintf(card_num_two, "%d", card_integer_two);
+	sprintf(card_num_bet, "%d", card_integer_bet);
+
+	strcat(send_buf, "\n");
+	strcat(send_buf, "   ");
+	strcpy(send_buf, card_num_one);
+	strcat(send_buf, " ? ");
+	strcat(send_buf, card_num_two);
+	strcat(send_buf, "\n");
+
+	printf("test: %s \n", send_buf);
+	printf("bet number: %s \n", card_num_bet);
+
+	for(i=0; i<MAX_GAME_MEMBER; i++) 
+	{
+	      //무효한 소켓이 아니면 전송.//
+	     if(game_people_list[i].game_student_socket != INVALID_SOCK)
+	     {
+		  write(game_people_list[i].game_student_socket, send_buf, strlen(send_buf));
+	     }
+	}
+}
+////////////////////////////////
+void init_value()
+{
+	int i;
+	int default_batting_count = 3; //기본 카운트 횟수.//
+	int default_batting_money = 0; //기본 베팅금액.//
+
+	//현재 연결되어있는 사용자들의 베팅정보를 다음 번 게임을 위해 초기화.//
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(game_people_list[i].game_student_socket != INVALID_SOCK)
+		{
+			game_people_list[i].batting_money = default_batting_money;
+			game_people_list[i].batting_count = default_batting_count;
+		}
+	}
+
+	//최저금액 초기화.//
+	lower_betting_money = 0;
+
+	//카운터 초기화.//
+	total_betting_count = 0;
+	
+	//레디한 사람의 수 초기화.//
+	people_count = 0;
+	
+	//레디 수 조건 초기화.//
+	check_game_play = 0;
+
+	//레디배열 초기화.//
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		ready_list[i] = INVALID_SOCK; //현재 최대 클라이언트까지 모든 소켓을 우선 무효한 소켓으로 만든다.//
+	}
+}
+/////////////////////////////////
+void save_win_lose_file(char *win_people, char *lose_people)
+{
+	timer = time(NULL); //시간초기화.//
+	t = localtime(&timer); //현재 시간으로 초기화.//
+
+	FILE *game_log_file_pointer = NULL;
+	FILE *win_lose_file_pointer = NULL;
+
+	//이긴 사람의 경우.//
+	int win_point = 1; //승점 포인트.//
+	int w_load_win_point = 0; //누적포인트.//
+	int w_load_lose_point = 0;
+
+	//진 사람의 경우.//
+	int lose_point = 1;
+	int l_load_lose_point = 0;
+	int l_load_win_point = 0;
+
+	char *student_name = NULL;
+	char *student_num = NULL;
+	char *date = NULL;
+	char *date_2 = NULL;
+	char *stu_info = NULL;
+
+	int current_win_point;
+	int current_lose_point;
+
+	student_name = (char *)malloc(strlen("Input")+1);
+	student_num = (char *)malloc(strlen("Input")+1); 
+	date = (char *)malloc(strlen("Input")+1);
+	date_2 = (char *)malloc(strlen("Input")+1);
+	stu_info = (char *)malloc(strlen("Input")+1);
+
+	if((game_log_file_pointer = fopen("game_log.txt", "r+")) == NULL) //읽기쓰기 모드로 개방.//
+	{
+		fprintf(stderr, "fopen() error\n");
+		exit(1);
+	}
+
+	printf("\nwin people : %s\n", win_people);
+	printf("lose people : %s\n", lose_people);
+
+	//
+	//printf("win student name : %s\n / lose student name : %s\n", win_people, lose_people);
+	//fprintf(win_lose_file_pointer, "[%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+	//우선 이름이 존재하는지 검사.있으면 이긴 사람이 파싱되면 승점을 올리고, 진 사람이 파싱성공하면 패배점을 기록.//
+	/*sprintf(date, "[%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+
+	//데이터를 저장.//	
+	fprintf(win_lose_file_pointer, "%s %s %d %d\n", date, win_people, w_win_point,w_lose_point);
+	fprintf(win_lose_file_pointer, "%s %s %d %d\n", date, lose_people, l_win_point,l_lose_point);*/
+
+	int loop_count = 0;
+
+	while(!feof(game_log_file_pointer))
+	{
+		fscanf(game_log_file_pointer, "%s %s %s %s %d %d\n", date, date_2, student_name, student_num, &current_win_point, &current_lose_point);
+		
+		//비교를 위해 다시 문자열을 묶어준다.//
+		sprintf(stu_info, "%s %s", student_name, student_num);
+		
+		if(strcmp(stu_info, win_people) == 0)
+		{
+			if(current_win_point > 0)
+			{
+				w_load_win_point = current_win_point;
+			}
+
+			if(current_lose_point > 0)
+			{
+				w_load_lose_point = current_lose_point;
+			}
+		}
+
+		else if(strcmp(stu_info, lose_people) == 0)
+		{
+			if(current_lose_point > 0)
+			{
+				l_load_lose_point = current_lose_point;
+			}
+
+			if(current_win_point > 0)
+			{
+				l_load_win_point = current_win_point;
+			}
+		}
+
+		loop_count++;
+	}
+
+	printf("total people number : %d, win_load_point : %d, lose_load_point : %d\n", loop_count, w_load_win_point, l_load_lose_point);
+	
+	//이긴 사람 기준으로 1을 더해서 저장한다. 그럼 로그파일에 당시 승리자와 패배자의 승률이 찍힌다.//
+	w_load_win_point += win_point;
+	l_load_lose_point += lose_point;
+
+	sprintf(date, "[%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+
+	fprintf(game_log_file_pointer, "%s %s %d %d\n", date, win_people, w_load_win_point,w_load_lose_point);
+	fprintf(game_log_file_pointer, "%s %s %d %d\n", date, lose_people, l_load_win_point,l_load_lose_point);
+
+	fclose(game_log_file_pointer);
+}
+/////////////////////////////////
+void save_game_logfile()
+{
+	int i;
+
+	timer = time(NULL); //시간초기화.//
+	t = localtime(&timer); //현재 시간으로 초기화.//
+
+	FILE *game_log_file_pointer = NULL;
+
+	int default_win_point = 0;
+	int default_lose_point = 0;
+	char *date = NULL;
+
+	date = (char *)malloc(strlen("Input")+1);
+
+	if((game_log_file_pointer = fopen("game_log.txt", "a")) == NULL)
+	{
+		fprintf(stderr, "fopen() error\n");
+		exit(1);
+	}
+
+	sprintf(date, "[%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(game_people_list[i].game_student_socket != INVALID_SOCK)
+		{
+			fprintf(game_log_file_pointer, "%s %s %d %d\n", date,game_people_list[i].game_student_info , default_win_point, default_lose_point);
+		}
+	}
+
+	fclose(game_log_file_pointer);
+}
+/////////////////////////////////
+int pushClient(int c_socket)
+{
+	int i,j;
+	char recv_buf[BUFSIZ];
+	char send_buf[BUFSIZ];	
+	int recv_len;
+	char *token;
+	char *delim = " "; //띄어쓰기가 구분자.//
+	int check_value; //인증번호 성공 유무 변수.//
+	int token_count=0;
+	char *password;
+	char *student_number;
+	char *in_student_name = NULL;
+	int check_value_2; // 학번인증 성공 유무.//
+
+	in_student_name = (char *)malloc(strlen("Input")+1);
+	password = (char *)malloc(strlen("Input")+1);
+	student_number = (char *)malloc(strlen("Input")+1);
+
+	recv_len = read(c_socket, recv_buf, BUFSIZ); //정보를 얻어온다.//
+	
+	if(recv_len == -1)
+	{
+		fprintf(stderr, "read() error\n");
+		exit(1);
+	}
+
+	recv_buf[recv_len] = '\0';
+
+	//printf("info : %s\n", recv_buf);
+
+	//인증번호를 파싱하기 위해서 strtok사용.//
+	token = strtok(recv_buf, delim); //최초 이름을 분리.//
+	strcpy(in_student_name, token);
+
+	token_count++;
+
+	while(token!= NULL) //문자열 분리.//
+	{
+		//잴 마지막 분리이니 그냥 카피.//
+		strcpy(password, token);
+
+		token = strtok(NULL, delim); //두번째 학번 분리.//
+		
+		if(token_count == 1)
+		{
+			strcpy(student_number, token);
+		}
+
+		token_count++;
+	}
+
+	//printf("Input password : %s\n", password);
+
+	check_value = Check_Info(password); //인증번호를 비교.//
+	check_value_2 = Check_Info_2(student_number); //학번을 비교.//
+	
+	printf("%d / %d\n", check_value, check_value_2);
+	if(check_value == 0 || check_value_2 == 0) //0이면 인증 실패.//
+	{
+		i=-2; //-2를 반환.//
+
+		return i;
+	}
+
+	else if(check_value == 1 && check_value_2 == 1) //1이면 인증성공.//
+	{
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			//정보가 저장되는 부분.//
+			if(game_people_list[i].game_student_socket == INVALID_SOCK)
+			{
+				game_people_list[i].game_student_socket = c_socket;
+				game_people_list[i].game_student_info = (char *)malloc(strlen("Input")+1);
+				sprintf(game_people_list[i].game_student_info, "%s %s", in_student_name, student_number);
+				game_people_list[i].batting_money = 0; //기본 금액은 0원.//
+				game_people_list[i].batting_count = 3; //기본 배팅횟수는 3번.//
+
+				for(j=0; j<MAX_GAME_MEMBER; j++)
+				{	               
+					if(game_people_list[j].game_student_socket != INVALID_SOCK)		      
+					{        
+						strcat(send_buf, "\n");
+		
+						sprintf(send_buf, "[%s] %s",game_people_list[i].game_student_info, in_message);
+					
+						strcat(send_buf, "\n");
+					
+						write(game_people_list[j].game_student_socket, send_buf, strlen(send_buf));
+					}
+				}
+
+				i=0;
+				return i;
+			}
+		}
+	}
+
+	if(i==MAX_GAME_MEMBER)
+	{
+		return -1;
+	}
+}
+////////////////////////////////////
+int popClient(int select_socket)
+{
+	int i;
+	int j;
+	char send_buf[BUFSIZ];
+	int send_len;
+
+	close(select_socket);
+	people_count--;
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket)
+		{
+			game_people_list[i].game_student_socket = INVALID_SOCK; //해당 소켓을 다시 -1로 만든다.//
+			
+			strcat(send_buf, "\n");
+			sprintf(send_buf, "[%s] %s", game_people_list[i].game_student_info, out_message);
+			strcat(send_buf, "\n");
+		
+			memset(game_people_list[i].game_student_info, 0, sizeof(char)*20); //정보 초기화.//
+
+			for(j=0; j<MAX_GAME_MEMBER; j++) //다른 클라이언트에게 나갔다는 메시지 전달.//
+			{
+				if(game_people_list[j].game_student_socket != INVALID_SOCK)
+				{
+					write(game_people_list[j].game_student_socket, send_buf, strlen(send_buf));
+
+					//memset(chat_buf, 0, sizeof(char)*BUFSIZ);
+				}
+			}
+
+			break;
+		}
+	}
+
+	return 0;
+}
+//////////////////////////////////
+void sig_handler(int signum)
+{
+	if(signum == SIGINT) //Ctrl+C키를 눌렀을 경우 처리.//
+	{
+		fflush(stdout);
+
+		int i;
+		char chat_buf[BUFSIZ];
+
+		//모든 연결된 맴버에게 종료 알림을 한다.//
+		for(i=0; i<MAX_GAME_MEMBER; i++)
+		{
+			sprintf(chat_buf, "\n%s\n", server_out_message);
+
+			write(game_people_list[i].game_student_socket, chat_buf, strlen(chat_buf));
+
+			memset(chat_buf, 0, sizeof(char)*BUFSIZ);
+		}
+
+		printf("\n");
+
+		close(serv_sock);
+
+		exit(1); //서버가 종료된다.//
+	}
+}
+/////////////////////////////////
+void service_file_List(int select_sock, char send_buf[])
+{
+	struct dirent *dp; //파일과 디렉터리 관련 여러 정보를 가지고 있는 구조체.//
+	DIR *dirp; //디렉터리를 가리킬 수 있는 타입.//
+	struct stat status; //파일에 대해서 세부적인 정보를 알 수 있는 구조체정보.//
+
+	int file_size = 0; //파일 사이즈가 저장될 변수.//
+	char file_size_buf[BUFSIZ];
+	int send_len = 0;
+	char *time; //날짜 관련 변수.//
+	char time_buf[BUFSIZ]; 
+	int inode;
+
+	if((dirp = opendir(".")) == NULL) //해당 디렉터리를 오픈해서 파일의 정보를 불러온다.//
+	{
+		fprintf(stderr, "opendir() error\n");
+		exit(1);
+	}
+
+	//디렉터리 내에 있는 파일을 읽는다.//
+	while((dp = readdir(dirp)) != NULL)
+	{
+		//stat를 이용해서 파일의 세부정보를 알아온다.//
+		if(stat(dp->d_name, &status) < 0)
+		{
+			fprintf(stderr, "stat() error\n");
+			exit(1);
+		}
+
+		inode = (int)dp->d_ino; //아이노드 데이터 추출.//
+		sprintf(send_buf, "%d", inode); //10진법의 숫자를 문자열로 변환.//
+		
+		file_size = (int)status.st_size;
+
+		//시간정보 추출.//
+		time = ctime(&status.st_ctime); //시간정보 기록.//
+
+		strcat(send_buf, " ");
+		time[24] = ' ';
+
+		strcat(send_buf, time);
+
+		//파일크기 정보.//
+		strcat(send_buf, " ");
+		sprintf(file_size_buf, "%d", (int)status.st_size);
+		strcat(send_buf, file_size_buf);
+
+		//파일이름 정보. 히든파일 개념은 숨긴다.//
+		strcat(send_buf, " ");
+
+		if(strcmp(dp->d_name, "hanshin_server.c") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "hanshin_server") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "hanshin_server.c~") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, ".") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "..")==0)
+		{
+			continue;
+		}
+		
+		if(strcmp(dp->d_name, "ftp_logfile.txt~") == 0)
+		{
+			continue;
+		}
+
+		if(strcmp(dp->d_name, "ftp_logfile.txt") == 0)
+		{
+			continue;
+		}
+
+		else
+		{
+			strcat(send_buf, dp->d_name);
+		}
+
+		send_buf[strlen(send_buf)] = '\0';
+
+		strcat(send_buf, "\n");
+
+		write(select_sock, send_buf, strlen(send_buf));
+
+		memset(send_buf, 0, sizeof(char)*BUFSIZ);
+	}
+
+	closedir(dirp);
+}
+///////////////////////////////
+void download_file(int select_socket)
+{
+	char message[] = "\n* Download file name: (<download file name> -install)\n";
+
+	char recv_file_command[BUFSIZ]; //파일의 이름을 저장할 변수.//
+	char send_file_content[BUFSIZ]; //파일에 내용을 담을 변수.//
+	int recv_len;
+	int send_len;
+	char *tok;
+	char *file_name;
+	char *download_file_name;
+	char *delim = " "; //띄어쓰기가 구분자.//
+	int i,j;
+	char chracter;
+	int buffer_count = 0;
+	int tok_count = 0;
+
+	FILE *file_pointer = NULL;
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket)
+		{
+			memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+			memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+			file_name = (char *)malloc(strlen("Input")+1);
+			download_file_name = (char *)malloc(strlen("Input")+1);
+
+			printf("file download Service...\n");
+
+			send_len = write(select_socket, message, strlen(message));
+
+			if(send_len == -1)
+			{
+				fprintf(stderr, "write() error\n");
+				exit(1);
+			}
+ 
+			memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+			memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+			//파싱을 통해 다운로드 파일명 분리.//
+			recv_len = read(select_socket, recv_file_command, BUFSIZ);
+
+			if(recv_len == -1)
+			{
+				fprintf(stderr, "read() error\n");
+				exit(1);
+			}
+
+			tok = strtok(recv_file_command, delim);
+
+			printf("%s\n", tok);
+		
+			while(tok != NULL)
+			{
+				tok_count++;
+
+				tok = strtok(NULL, delim);
+
+				if(tok_count == 2) //두번째로 분리되는 것은 파일이름이다.//
+				{
+					strcpy(file_name, tok);
+					break;
+				}	
+			
+			}
+
+			printf("download file name : %s\n", file_name);
+			
+			int size = strlen(file_name)+1;
+
+			for(i=0; i<size; i++)
+			{
+				download_file_name[i] = file_name[i];
+			}
+
+			sleep(2); //2초뒤 에러메시지나 파일의 데이터를 전송.//
+	
+			//해당 파일을 오픈한다.//
+			if((file_pointer = fopen(file_name, "rb")) == NULL)
+			{
+				printf("file open error\n");
+
+				memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+
+				write(select_socket, "file is not exist...", strlen("file is not exist..."));
+
+				break;
+			}
+
+			else //파일이 존재하는 경우.//
+			{
+				memset(recv_file_command, 0, sizeof(char)*BUFSIZ);
+				memset(send_file_content, 0, sizeof(char)*BUFSIZ);
+
+				send_file_content[buffer_count] = '#';
+				buffer_count++;
+
+				//파일에 데이터를 읽어온다.fgetc()로 한문자씩 읽는다.//
+				while((chracter = fgetc(file_pointer)) != EOF)
+				{
+					 send_file_content[buffer_count] = chracter;
+
+					 buffer_count++; //버퍼에 저장하기 위해서 다음 버퍼로 이동한다.//
+				}
+
+				send_file_content[strlen(send_file_content)+1] = '\0';
+
+				send_len = write(select_socket, send_file_content, strlen(send_file_content));
+
+				if(send_len == -1)
+				{
+					fprintf(stderr, "write() error\n");
+					exit(1);
+				}
+
+				fclose(file_pointer); //파일 종료.//
+
+				//이 부분에서 FTP로그 파일을 개방한다.//
+				if((FTP_logfile_pointer = fopen("ftp_logfile.txt", "a")) == NULL)
+				{
+					fprintf(stderr, "ftp logfile open error\n");
+					exit(1);
+				}
+
+				printf("ftp log file open success...\n");
+
+				for(i=0; i<MAX_GAME_MEMBER; i++)
+				{
+					if(select_socket == game_people_list[i].game_student_socket)
+					{
+						//임계영역.//
+						timer = time(NULL); //시간초기화.//
+						t = localtime(&timer); //현재 시간으로 초기화.//
+
+						fputs("[FTP Service ", FTP_logfile_pointer);
+						fprintf(FTP_logfile_pointer, "%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+						fprintf(FTP_logfile_pointer, " %s", game_people_list[i].game_student_info);
+						fputs(" ", FTP_logfile_pointer);
+						fputs(download_file_name, FTP_logfile_pointer);
+						fputs(" [", FTP_logfile_pointer);
+						fputs("download]",  FTP_logfile_pointer);
+						fputs("\n", FTP_logfile_pointer);
+
+						break;
+					}
+				}
+
+				fclose(FTP_logfile_pointer);
+			}
+		}
+	}
+}
+////////////////////////////////
+void upload_file(int select_socket)
+{
+	int i;
+	char service_name[BUFSIZ];
+	char upload_file_name_check[BUFSIZ];
+	char upload_file_name[BUFSIZ];
+	char upload_file_content[BUFSIZ];
+	int send_len;
+	int recv_len;
+
+	FILE *upload_file_pointer = NULL;
+
+	for(i=0; i<MAX_GAME_MEMBER; i++)
+	{
+		if(select_socket == game_people_list[i].game_student_socket)
+		{
+			memset(service_name, 0, sizeof(char)*BUFSIZ);
+			memset(upload_file_name_check, 0, sizeof(char)*BUFSIZ);
+
+			if((recv_len = read(select_socket, upload_file_name_check, BUFSIZ)) > 0)
+			{
+				upload_file_name_check[recv_len] = '\0';
+				printf("check : %s\n", upload_file_name_check);
+			}
+
+			if(strcmp(upload_file_name, "file is not exist...") == 0)
+			{
+				printf("file is not exist...\n");
+
+				memset(upload_file_name, 0, sizeof(char)*BUFSIZ);
+				memset(upload_file_content, 0 ,sizeof(char)*BUFSIZ);
+
+				break;
+			}
+
+			if(strcmp(upload_file_name_check, "success") == 0)
+			{	
+				//printf("Success!!!!!!!!!!!\n");	
+				sleep(1); //전송단과 상황을 맞게 한다.//	
+	
+				recv_len = read(select_socket, upload_file_name, BUFSIZ);
+
+				if(recv_len == -1)
+				{
+					fprintf(stderr, "read() error\n");
+
+					exit(1);
+				}
+
+				upload_file_name[recv_len] = '\0';
+
+				printf("upload file : %s\n", upload_file_name);
+
+				sleep(1);
+
+				recv_len = read(select_socket, upload_file_content, BUFSIZ);
+
+				if(recv_len == -1)
+				{
+					fprintf(stderr, "read() error\n");
+				}
+
+				upload_file_content[recv_len] = '\0';
+
+				printf("%s\n", upload_file_content);
+
+				//업로드 파일은 올린사람이 정한 파일 이름 그대로 올려야 한다.//
+				if((upload_file_pointer = fopen(upload_file_name, "w")) == NULL)
+				{
+					fprintf(stderr, "file open error\n");
+
+					break;
+				}
+
+				if((FTP_logfile_pointer = fopen("ftp_logfile.txt", "a")) == NULL)
+				{
+					fprintf(stderr, "ftp logfile open error\n");
+					exit(1);
+				}
+
+				else
+				{	
+					printf("File open Success\n");
+					//파일에 데이터를 쓴다.//
+					fprintf(upload_file_pointer, upload_file_content, strlen(upload_file_content));
+
+					//임계영역.//
+					timer = time(NULL); //시간초기화.//
+					t = localtime(&timer); //현재 시간으로 초기화.//
+
+					fputs("[FTP Service ", FTP_logfile_pointer);
+					fprintf(FTP_logfile_pointer, "%d.%d.%d %d:%d:%d]", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+					fprintf(FTP_logfile_pointer, " %s", game_people_list[i].game_student_info);
+					fputs(" ", FTP_logfile_pointer);
+					fputs(upload_file_name, FTP_logfile_pointer);
+					fputs(" [", FTP_logfile_pointer);
+					fputs("upload]",  FTP_logfile_pointer);
+					fputs("\n", FTP_logfile_pointer);
+
+					fclose(upload_file_pointer);
+					fclose(FTP_logfile_pointer);
+
+					memset(upload_file_name, 0, sizeof(char)*BUFSIZ);
+					memset(upload_file_content, 0 ,sizeof(char)*BUFSIZ);
+
+					break;
+				}
+			}
+		}
+	}
+}
